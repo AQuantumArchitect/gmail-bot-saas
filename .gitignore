@@ -13,6 +13,7 @@
 .env.staging
 .env.development
 .env.test
+.railwayvariables
 
 # ====================================================================
 # PYTHON
@@ -132,4 +133,5 @@ private_keys/
 # ====================================================================
 .railway/
 .vercel/
-.netlify/
+.netlify/.railwayvariables
+.railwayvariables
