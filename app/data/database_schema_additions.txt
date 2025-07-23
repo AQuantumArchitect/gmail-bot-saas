@@ -1,0 +1,224 @@
+-- ===================================================================
+-- Supabase Email-Bot SaaS: Full Reset & Reinstall Script
+-- Drops and rebuilds the public schema around Supabase auth
+-- ===================================================================
+
+-- 1. DROP & RECREATE PUBLIC SCHEMA
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public;
+GRANT ALL ON SCHEMA public TO postgres;
+
+-- 2. RE-ENABLE EXTENSIONS
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
+
+-- 3. CORE PROFILE TABLE (shadow metadata for auth.users)
+CREATE TABLE public.user_profiles (
+  user_id        UUID PRIMARY KEY
+                   REFERENCES auth.users(id) ON DELETE CASCADE,
+  display_name   TEXT,
+  timezone       TEXT DEFAULT 'UTC',
+  email_filters  JSONB NOT NULL DEFAULT '{
+    "exclude_senders": [],
+    "exclude_domains": ["noreply@", "no-reply@"],
+    "include_keywords": [],
+    "exclude_keywords": ["unsubscribe", "marketing"],
+    "min_email_length": 100,
+    "max_emails_per_batch": 5
+  }',
+  ai_preferences JSONB NOT NULL DEFAULT '{
+    "summary_style": "concise",
+    "summary_length": "medium",
+    "include_action_items": true,
+    "include_sentiment": false,
+    "language": "en"
+  }',
+  created_at     TIMESTAMPTZ DEFAULT now(),
+  updated_at     TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE public.user_profiles ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Profiles: own" ON public.user_profiles
+  FOR ALL USING (auth.uid() = user_id);
+
+-- 4. GMAIL CONNECTIONS
+CREATE TABLE public.gmail_connections (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id          UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  refresh_token    BYTEA NOT NULL,
+  access_token     BYTEA,
+  token_expires_at TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ DEFAULT now(),
+  updated_at       TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE public.gmail_connections ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Gmail: own connections" ON public.gmail_connections
+  FOR ALL USING (auth.uid() = user_id);
+
+-- 5. EMAIL_PROCESSING PIPELINE TABLES
+
+-- 5.1 Email Discoveries
+CREATE TABLE public.email_discoveries (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id          UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  gmail_message_id TEXT NOT NULL,
+  discovery_status TEXT NOT NULL DEFAULT 'discovered',
+  filter_results   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  discovered_at    TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE public.email_discoveries ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Discoveries: own" ON public.email_discoveries
+  FOR ALL USING (auth.uid() = user_id);
+
+-- 5.2 Processing Jobs
+CREATE TABLE public.processing_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  email_discovery_id UUID NOT NULL REFERENCES public.email_discoveries(id) ON DELETE CASCADE,
+  job_type TEXT NOT NULL CHECK (job_type IN ('email_summary','email_classification','action_extraction')),
+  job_status TEXT NOT NULL CHECK (job_status IN ('pending','running','completed','failed','cancelled','retrying')),
+  processing_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  processing_duration_ms INTEGER,
+  error_message TEXT,
+  error_details JSONB,
+  retry_count INTEGER DEFAULT 0,
+  max_retries INTEGER DEFAULT 3,
+  next_retry_at TIMESTAMPTZ,
+  ai_provider TEXT DEFAULT 'anthropic',
+  ai_model TEXT DEFAULT 'claude-3-haiku-20240307',
+  ai_tokens_used INTEGER,
+  ai_cost_usd DECIMAL(10,6),
+  credits_required INTEGER DEFAULT 1,
+  credits_charged INTEGER,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE public.processing_jobs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "ProcessingJobs: own" ON public.processing_jobs FOR ALL USING (auth.uid() = user_id);
+
+-- 5.3 Email Summaries
+CREATE TABLE public.email_summaries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  processing_job_id UUID NOT NULL REFERENCES public.processing_jobs(id) ON DELETE CASCADE,
+  email_discovery_id UUID NOT NULL REFERENCES public.email_discoveries(id) ON DELETE CASCADE,
+  summary_text TEXT NOT NULL,
+  summary_html TEXT,
+  key_points TEXT[],
+  action_items TEXT[],
+  sentiment_score DECIMAL(3,2),
+  urgency_level TEXT CHECK (urgency_level IN ('low','medium','high','urgent')),
+  category TEXT,
+  tags TEXT[],
+  ai_confidence_score DECIMAL(3,2),
+  processing_notes TEXT,
+  delivery_status TEXT DEFAULT 'pending' CHECK (delivery_status IN ('pending','delivered','failed','skipped')),
+  delivered_at TIMESTAMPTZ,
+  delivery_method TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE public.email_summaries ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "EmailSummaries: own" ON public.email_summaries FOR ALL USING (auth.uid() = user_id);
+
+-- 5.4 Credit Transactions
+CREATE TABLE public.credit_transactions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  transaction_type TEXT NOT NULL CHECK (transaction_type IN ('purchase','usage','refund','bonus','adjustment')),
+  credit_amount INTEGER NOT NULL,
+  credit_balance_after INTEGER NOT NULL,
+  description TEXT NOT NULL,
+  reference_id UUID,
+  reference_type TEXT,
+  usd_amount DECIMAL(10,2),
+  usd_per_credit DECIMAL(6,4),
+  metadata JSONB DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE public.credit_transactions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "CreditTransactions: own" ON public.credit_transactions FOR ALL USING (auth.uid() = user_id);
+
+-- 5.5 Usage Analytics
+CREATE TABLE public.usage_analytics (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL CHECK (event_type IN ('email_processed','gmail_connected','gmail_disconnected','credits_purchased','settings_changed','login','api_call')),
+  event_details JSONB DEFAULT '{}'::jsonb,
+  session_id UUID,
+  user_agent TEXT,
+  ip_address INET,
+  response_time_ms INTEGER,
+  error_occurred BOOLEAN DEFAULT false,
+  error_message TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE public.usage_analytics ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "UsageAnalytics: own" ON public.usage_analytics FOR ALL USING (auth.uid() = user_id);
+
+-- 5.6 Background Jobs
+CREATE TABLE public.background_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_type TEXT NOT NULL,
+  job_name TEXT,
+  job_queue TEXT DEFAULT 'default',
+  job_payload JSONB NOT NULL,
+  job_options JSONB DEFAULT '{}'::jsonb,
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending','running','completed','failed','cancelled','retrying')),
+  scheduled_at TIMESTAMPTZ DEFAULT now(),
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  error_message TEXT,
+  error_details JSONB,
+  retry_count INTEGER DEFAULT 0,
+  max_retries INTEGER DEFAULT 3,
+  retry_delay_seconds INTEGER DEFAULT 60,
+  worker_id TEXT,
+  worker_version TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE public.background_jobs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "BackgroundJobs: service" ON public.background_jobs FOR ALL USING (auth.role() = 'service_role');
+
+-- 5.7 System Config
+CREATE TABLE public.system_config (
+  key TEXT PRIMARY KEY,
+  value JSONB NOT NULL,
+  description TEXT,
+  config_type TEXT DEFAULT 'setting' CHECK (config_type IN ('setting','feature_flag','secret','cache')),
+  value_schema JSONB,
+  is_sensitive BOOLEAN DEFAULT false,
+  is_readonly BOOLEAN DEFAULT false,
+  version INTEGER DEFAULT 1,
+  previous_value JSONB,
+  changed_by UUID REFERENCES auth.users(id),
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE public.system_config ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "SystemConfig: read" ON public.system_config FOR SELECT USING (auth.role() = 'authenticated' AND is_sensitive = false);
+
+-- 6. TIMESTAMP TRIGGERS
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_profiles_updated_at BEFORE UPDATE ON public.user_profiles FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_gmail_connections_updated_at BEFORE UPDATE ON public.gmail_connections FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_email_discoveries_updated_at BEFORE UPDATE ON public.email_discoveries FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_processing_jobs_updated_at BEFORE UPDATE ON public.processing_jobs FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_email_summaries_updated_at BEFORE UPDATE ON public.email_summaries FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_credit_transactions_updated_at BEFORE UPDATE ON public.credit_transactions FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_usage_analytics_updated_at BEFORE UPDATE ON public.usage_analytics FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_background_jobs_updated_at BEFORE UPDATE ON public.background_jobs FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_system_config_updated_at BEFORE UPDATE ON public.system_config FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- 7. COMPLETION NOTICE
+SELECT 'Reset complete. New supabase-based schema installed.';
