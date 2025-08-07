@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urlencode
 import httpx
 
-from app.core.billing_exceptions import (
+from app.core.exceptions import (
     StripeError, 
     WebhookValidationError, 
     RateLimitError,

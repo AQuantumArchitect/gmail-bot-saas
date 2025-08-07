@@ -9,7 +9,7 @@ import httpx
 
 # Import the client to be tested and its exceptions
 from app.external.stripe_client import StripeClient
-from app.core.billing_exceptions import WebhookValidationError, StripeError
+from app.core.exceptions import WebhookValidationError, StripeError
 
 # Test secrets
 TEST_SECRET_KEY = "sk_test_12345"

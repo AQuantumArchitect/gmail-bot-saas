@@ -2,7 +2,7 @@ import os
 from typing import Any, Dict, Optional
 from supabase import create_client, Client
 
-from app.config import settings
+from app.core.config import settings
 from app.core.exceptions import ValidationError, NotFoundError
 
 

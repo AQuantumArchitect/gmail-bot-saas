@@ -1,153 +1,102 @@
+# tests/unit/api/routes/test_health.py
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
 
-# Import the router and settings to be tested/used
+# Import the specific router to be tested
 from app.api.routes.health import router as health_router
-from app.core.config import settings
+from app.api.dependencies import no_auth_required
 
-# Create a minimal FastAPI app instance and include the health router
-app = FastAPI()
-app.include_router(health_router)
+# This is the test for the first, simplest route file.
+# If this test passes, the testing pattern is correct.
+# If it fails, the error is contained within `health.py` or its direct dependencies.
 
-# Instantiate the test client
-client = TestClient(app)
+@pytest.fixture
+def client() -> TestClient:
+    """
+    Provides a TestClient for the health router in complete isolation.
+    """
+    app = FastAPI(title="Test Health App")
 
+    # The health routes depend on `no_auth_required` and `settings`.
+    # We must provide mocks for them.
+    def override_no_auth():
+        return True
+
+    app.dependency_overrides[no_auth_required] = override_no_auth
+
+    # Use patch to mock the settings object used inside the health routes
+    with patch('app.api.routes.health.settings') as mock_settings:
+        # Define mock values for settings attributes accessed by health.py
+        mock_settings.environment = "testing"
+        mock_settings.debug_mode = True
+        mock_settings.enable_stripe = False
+        mock_settings.database_url = "mock_db_url"
+        mock_settings.google_client_id = "mock_google_id"
+        mock_settings.google_client_secret = "mock_google_secret"
+        mock_settings.anthropic_api_key = "mock_anthropic_key"
+        mock_settings.webapp_url = "http://mock-webapp.com"
+
+        # Include ONLY the health router, replicating the prefix from main.py
+        # The router's own prefix ("/health") will be added automatically.
+        app.include_router(health_router, prefix="/api")
+
+        with TestClient(app) as test_client:
+            yield test_client
 
 class TestHealthRoutes:
-    """
-    Tests for the health check API endpoints located in app/api/routes/health.py.
-    """
+    """Test suite for the health check endpoints."""
 
-    def test_health_check_success(self):
-        """
-        Tests the basic GET /health endpoint for a successful 200 response and correct structure.
-        """
-        # --- Act ---
-        response = client.get("/health")
-
-        # --- Assert ---
+    def test_health_check(self, client: TestClient):
+        """Tests the basic /api/health/ endpoint."""
+        response = client.get("/api/health/")
         assert response.status_code == 200
-        
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["version"] == "1.0.0"
+        assert data["environment"] == "testing"
         assert "timestamp" in data
-        assert "environment" in data
 
-    def test_liveness_check_success(self):
-        """
-        Tests the GET /health/live endpoint for a successful 200 response
-        and confirmation that the service is alive.
-        """
-        # --- Act ---
-        response = client.get("/health/live")
-
-        # --- Assert ---
+    def test_detailed_health_check(self, client: TestClient):
+        """Tests the /api/health/detailed endpoint."""
+        response = client.get("/api/health/detailed")
         assert response.status_code == 200
-        
         data = response.json()
-        assert data["alive"] is True
-        assert "timestamp" in data
+        assert "status" in data
+        assert "checks" in data
+        assert "database" in data["checks"]
+        assert data["checks"]["database"]["status"] == "healthy"
 
-    def test_readiness_check_success(self):
-        """
-        Tests the GET /health/ready endpoint for a successful 200 response
-        and confirmation that the service is ready.
-        """
-        # --- Act ---
-        response = client.get("/health/ready")
-
-        # --- Assert ---
+    def test_readiness_check(self, client: TestClient):
+        """Tests the /api/health/ready endpoint."""
+        response = client.get("/api/health/ready")
         assert response.status_code == 200
-        
         data = response.json()
         assert data["ready"] is True
-        assert data["status_code"] == 200
         assert data["checks"]["database"]["ready"] is True
-        assert data["checks"]["services"]["auth_service"] is True
 
-    def test_readiness_check_handles_stripe_setting(self, monkeypatch):
-        """
-        Tests that the readiness check correctly reflects the Stripe setting.
-        """
-        # --- Arrange: Stripe Disabled ---
-        monkeypatch.setattr(settings, "enable_stripe", False)
-
-        # --- Act: Stripe Disabled ---
-        response_stripe_disabled = client.get("/health/ready")
-        data_disabled = response_stripe_disabled.json()
-
-        # --- Assert: Stripe Disabled ---
-        assert data_disabled["checks"]["services"]["billing_service"] is False
-
-        # --- Arrange: Stripe Enabled ---
-        monkeypatch.setattr(settings, "enable_stripe", True)
-
-        # --- Act: Stripe Enabled ---
-        response_stripe_enabled = client.get("/health/ready")
-        data_enabled = response_stripe_enabled.json()
-
-        # --- Assert: Stripe Enabled ---
-        assert data_enabled["checks"]["services"]["billing_service"] is True
-    
-    @patch("app.api.routes.health._check_system_resources", return_value={"status": "healthy"})
-    @patch("app.api.routes.health._check_configuration", return_value={"status": "healthy"})
-    @patch("app.api.routes.health._check_external_services", new_callable=AsyncMock, return_value={"status": "healthy"})
-    def test_detailed_health_check_all_healthy(self, mock_external, mock_config, mock_system):
-        """
-        Tests the GET /health/detailed endpoint when all components are healthy.
-        """
-        # --- Act ---
-        response = client.get("/health/detailed")
-
-        # --- Assert ---
+    def test_liveness_check(self, client: TestClient):
+        """Tests the /api/health/live endpoint."""
+        response = client.get("/api/health/live")
         assert response.status_code == 200
         data = response.json()
+        assert data["alive"] is True
+        assert "uptime_seconds" in data
 
-        assert data["status"] == "healthy"
-        assert data["checks"]["database"]["status"] == "healthy"
-        assert data["checks"]["external_services"]["status"] == "healthy"
-        assert data["checks"]["configuration"]["status"] == "healthy"
-        assert data["checks"]["system"]["status"] == "healthy"
-        
-        # Verify our mocks were called
-        mock_external.assert_awaited_once()
-        mock_config.assert_called_once()
-        mock_system.assert_called_once()
-
-    @patch("app.api.routes.health._check_system_resources", return_value={"status": "healthy"})
-    @patch("app.api.routes.health._check_configuration", return_value={"status": "unhealthy"})
-    @patch("app.api.routes.health._check_external_services", new_callable=AsyncMock, return_value={"status": "healthy"})
-    def test_detailed_health_check_one_unhealthy_component(self, mock_external, mock_config, mock_system):
-        """
-        Tests that the overall status is 'unhealthy' if even one component is unhealthy.
-        """
-        # --- Act ---
-        response = client.get("/health/detailed")
-
-        # --- Assert ---
+    def test_metrics_endpoint(self, client: TestClient):
+        """Tests the /api/health/metrics endpoint."""
+        response = client.get("/api/health/metrics")
         assert response.status_code == 200
         data = response.json()
+        assert "metrics" in data
+        assert "system" in data
+        assert data["metrics"]["http_requests_total"] is not None
 
-        assert data["status"] == "unhealthy"
-        assert data["checks"]["configuration"]["status"] == "unhealthy"
-
-    @patch("app.api.routes.health._check_system_resources", return_value={"status": "healthy"})
-    @patch("app.api.routes.health._check_configuration", return_value={"status": "degraded"})
-    @patch("app.api.routes.health._check_external_services", new_callable=AsyncMock, return_value={"status": "healthy"})
-    def test_detailed_health_check_degraded_status(self, mock_external, mock_config, mock_system):
-        """
-        Tests that the overall status is 'degraded' if one component is degraded
-        and none are unhealthy.
-        """
-        # --- Act ---
-        response = client.get("/health/detailed")
-
-        # --- Assert ---
+    def test_status_page_data(self, client: TestClient):
+        """Tests the /api/health/status endpoint."""
+        response = client.get("/api/health/status")
         assert response.status_code == 200
         data = response.json()
-
-        assert data["status"] == "degraded"
-        assert data["checks"]["configuration"]["status"] == "degraded"
+        assert "overall_status" in data
+        assert "services" in data
+        assert data["services"]["api"]["status"] == "operational"

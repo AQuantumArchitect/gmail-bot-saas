@@ -1,242 +1,275 @@
 import pytest
-import asyncio
-from uuid import uuid4, UUID
-from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID, uuid4
+from datetime import datetime
 
-import stripe
-from stripe import error as stripe_error
-
-from app.services.billing_service import BillingService, StripeGateway
-from app.data.repositories.user_repository import UserRepository
+# Import classes to be tested, mocked, and used in tests
+from app.services.billing_service import BillingService, InvalidPackageError, PaymentProcessingError, WebhookValidationError
 from app.data.repositories.billing_repository import BillingRepository
-from app.data.repositories.audit_repository import AuditRepository
-from app.core.exceptions import ValidationError, NotFoundError, APIError, AuthenticationError
-from app.config import settings
+from app.data.repositories.user_repository import UserRepository
+from app.external.stripe_client import StripeClient
+from app.models.billing import CreditBalance, TransactionRecord, CheckoutSession, WebhookEvent, BillingHistory
+from app.core.config import settings, CreditPackage
+from app.core.exceptions import NotFoundError, InsufficientCreditsError, ValidationError, ConfigurationError
 
-
-@pytest.fixture(autouse=True)
-def enable_stripe():
-    # Ensure Stripe is enabled for tests
-    settings.enable_stripe = True
-    yield
-    settings.enable_stripe = True
-
+# --- Fixtures ---
 
 @pytest.fixture
-def mock_user_repo():
-    return MagicMock(spec=UserRepository)
-
-
-@pytest.fixture
-def mock_billing_repo():
-    return AsyncMock(spec=BillingRepository)
-
-
-@pytest.fixture
-def mock_audit_repo():
-    return AsyncMock(spec=AuditRepository)
-
+def mock_billing_repo() -> MagicMock:
+    """Provides a mock BillingRepository with async methods."""
+    mock = MagicMock(spec=BillingRepository)
+    mock.create_transaction = AsyncMock()
+    mock.list_transactions_for_user = AsyncMock()
+    mock.get_transaction_by_id = AsyncMock()
+    mock.find_transaction_by_reference = AsyncMock()
+    mock.get_user_transaction_summary = AsyncMock()
+    return mock
 
 @pytest.fixture
-def mock_gateway():
-    return MagicMock(spec=StripeGateway)
-
+def mock_user_repo() -> MagicMock:
+    """Provides a mock UserRepository."""
+    mock = MagicMock(spec=UserRepository)
+    mock.get_user_profile = MagicMock()
+    mock.update_user_profile = MagicMock()
+    mock.update_credits = MagicMock()
+    return mock
 
 @pytest.fixture
-def service(mock_user_repo, mock_billing_repo, mock_audit_repo, mock_gateway):
-    return BillingService(
-        user_repository=mock_user_repo,
-        billing_repository=mock_billing_repo,
-        audit_repository=mock_audit_repo,
-        stripe_gateway=mock_gateway
-    )
+def test_user_id() -> UUID:
+    """Provides a consistent UUID for a test user."""
+    return uuid4()
 
+# --- Test Classes ---
 
-def test_get_credit_packages(service):
-    packs = service.get_credit_packages()
-    assert isinstance(packs, dict)
-    assert "starter" in packs and "pro" in packs and "enterprise" in packs
+class TestBillingServiceInitialization:
+    """Tests for the initialization of the BillingService."""
 
+    def test_initialization_success_stripe_disabled(self, mock_billing_repo, mock_user_repo):
+        """Test that the service initializes correctly with Stripe disabled."""
+        with patch('app.services.billing_service.settings.enable_stripe', False):
+            service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+            assert service.billing_repo is mock_billing_repo
+            assert service.user_repo is mock_user_repo
+            assert service.stripe_client is None
 
-def test_get_billing_status(service):
-    settings.enable_stripe = True
-    status = service.get_billing_status()
-    assert status == {"stripe_enabled": True, "status": "healthy"}
-    settings.enable_stripe = False
-    status = service.get_billing_status()
-    assert status == {"stripe_enabled": False, "status": "disabled"}
+    def test_initialization_with_stripe_enabled_and_key(self, mock_billing_repo, mock_user_repo):
+        """Test that the Stripe client is created when Stripe is enabled and a key is present."""
+        with patch('app.services.billing_service.settings.enable_stripe', True), \
+             patch('app.services.billing_service.settings.stripe_secret_key', 'sk_test_123'), \
+             patch('app.services.billing_service.StripeClient') as MockStripe:
+            
+            service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+            assert service.stripe_client is not None
+            MockStripe.assert_called_once_with(secret_key='sk_test_123', webhook_secret=settings.stripe_webhook_secret)
 
-
-@pytest.mark.asyncio
-async def test_create_checkout_session_existing_customer(service, mock_user_repo, mock_audit_repo):
-    user_id = uuid4()
-    pkg = service.credit_packages['starter']
-    # Existing stripe_customer_id
-    mock_user_repo.get_user_profile.return_value = {"stripe_customer_id": "cus_123", "email": "a@b.com", "credits_remaining": 0}
-    fake_session = MagicMock(id="sess_1", url="http://checkout")
-    service.gateway.create_checkout_session.return_value = fake_session
-
-    res = await service.create_checkout_session(user_id, 'starter')
-
-    service.gateway.create_customer.assert_not_called()
-    service.gateway.create_checkout_session.assert_called_once()
-    mock_user_repo.update_user_profile.assert_not_called()
-    mock_audit_repo.log_event.assert_awaited_once_with(str(user_id), 'checkout_session_created', {'session_id': 'sess_1'})
-    assert res == {'session_id': 'sess_1', 'checkout_url': 'http://checkout'}
-
+    def test_initialization_with_stripe_enabled_no_key_raises_error(self, mock_billing_repo, mock_user_repo):
+        """Test that a ConfigurationError is raised if Stripe is enabled without a secret key."""
+        with patch('app.services.billing_service.settings.enable_stripe', True), \
+             patch('app.services.billing_service.settings.stripe_secret_key', None):
+            
+            with pytest.raises(ConfigurationError, match="Stripe secret key required"):
+                BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
 
 @pytest.mark.asyncio
-async def test_create_checkout_session_new_customer(service, mock_user_repo, mock_audit_repo):
-    user_id = uuid4()
-    # No stripe_customer_id
-    mock_user_repo.get_user_profile.return_value = {"stripe_customer_id": None, "email": "a@b.com", "credits_remaining": 0}
-    fake_customer = MagicMock(id="cus_new")
-    fake_session = MagicMock(id="sess_2", url="http://checkout2")
-    service.gateway.create_customer.return_value = fake_customer
-    service.gateway.create_checkout_session.return_value = fake_session
+class TestCreditBalanceOperations:
+    """Tests for credit balance methods in BillingService."""
 
-    res = await service.create_checkout_session(user_id, 'pro')
+    async def test_get_credit_balance_success(self, mock_billing_repo, mock_user_repo, test_user_id):
+        mock_user_repo.get_user_profile.return_value = {"user_id": str(test_user_id), "credits_remaining": 100}
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+        
+        balance = await service.get_credit_balance(test_user_id)
+        
+        assert isinstance(balance, CreditBalance)
+        assert balance.user_id == test_user_id
+        assert balance.credits_remaining == 100
 
-    service.gateway.create_customer.assert_called_once()
-    mock_user_repo.update_user_profile.assert_called_once_with(str(user_id), {'stripe_customer_id': 'cus_new'})
-    # Check that audit log was called twice with the expected calls
-    assert mock_audit_repo.log_event.await_count == 2
-    calls = mock_audit_repo.log_event.await_args_list
-    assert (str(user_id), 'stripe_customer_created', {'customer_id': 'cus_new'}) in [call[0] for call in calls]
-    assert (str(user_id), 'checkout_session_created', {'session_id': 'sess_2'}) in [call[0] for call in calls]
-    assert res['session_id'] == 'sess_2'
+    async def test_get_credit_balance_user_not_found(self, mock_billing_repo, mock_user_repo, test_user_id):
+        mock_user_repo.get_user_profile.return_value = None
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+        
+        with pytest.raises(NotFoundError):
+            await service.get_credit_balance(test_user_id)
 
-
-@pytest.mark.asyncio
-async def test_create_checkout_session_invalid_package(service):
-    with pytest.raises(ValidationError):
-        await service.create_checkout_session(uuid4(), 'invalid')
-
-
-@pytest.mark.asyncio
-async def test_create_checkout_session_disabled(service):
-    settings.enable_stripe = False
-    with pytest.raises(APIError):
-        await service.create_checkout_session(uuid4(), 'starter')
-    settings.enable_stripe = True
-
+    async def test_check_credit_sufficiency_true(self, mock_billing_repo, mock_user_repo, test_user_id):
+        mock_user_repo.get_user_profile.return_value = {"user_id": str(test_user_id), "credits_remaining": 50}
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+        
+        has_enough = await service.check_credit_sufficiency(test_user_id, 20)
+        assert has_enough is True
 
 @pytest.mark.asyncio
-async def test_handle_webhook_checkout_processed(service, mock_billing_repo, mock_user_repo, mock_audit_repo):
-    user_id = uuid4()
-    ref_id = str(uuid4())
-    metadata = {'user_id': str(user_id), 'credits': '10'}
-    event = {'type': 'checkout.session.completed', 'data': {'object': {'id': ref_id, 'amount_total': 1000, 'metadata': metadata}}}
-    service.gateway.construct_event.return_value = event
-    mock_billing_repo.find_transaction_by_reference.return_value = None
-    mock_user_repo.get_user_profile.return_value = {'stripe_customer_id': 'x', 'credits_remaining': 5}
+class TestCreditTransactions:
+    """Tests for adding and deducting credits."""
 
-    res = await service.handle_webhook('p', 's')
+    async def test_deduct_credits_success(self, mock_billing_repo, mock_user_repo, test_user_id):
+        initial_balance = 100
+        mock_user_repo.get_user_profile.return_value = {"user_id": str(test_user_id), "credits_remaining": initial_balance}
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
 
-    mock_billing_repo.find_transaction_by_reference.assert_awaited_once_with(UUID(ref_id))
-    mock_billing_repo.create_credit_purchase_transaction.assert_awaited_once()
-    mock_user_repo.add_credits.assert_called_once_with(str(user_id), 10, "Stripe purchase")
-    mock_audit_repo.log_event.assert_awaited_once_with(str(user_id), 'purchase_completed', {'reference_id': ref_id})
-    assert res == {'status': 'processed', 'event_type': 'checkout.session.completed'}
+        await service.deduct_credits(user_id=test_user_id, credit_amount=10, description="Test usage")
 
+        mock_user_repo.update_credits.assert_called_once_with(str(test_user_id), 90)
+        mock_billing_repo.create_transaction.assert_awaited_once()
 
-@pytest.mark.asyncio
-async def test_handle_webhook_idempotent(service, mock_billing_repo):
-    ref_id = str(uuid4())
-    metadata = {'user_id': str(uuid4()), 'credits': '5'}
-    event = {'type': 'checkout.session.completed', 'data': {'object': {'id': ref_id, 'metadata': metadata}}}
-    service.gateway.construct_event = MagicMock(return_value=event)
-    mock_billing_repo.find_transaction_by_reference.return_value = {'id': 't'}
+    async def test_deduct_credits_insufficient_funds(self, mock_billing_repo, mock_user_repo, test_user_id):
+        mock_user_repo.get_user_profile.return_value = {"user_id": str(test_user_id), "credits_remaining": 5}
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
 
-    res = await service.handle_webhook('p', 's')
-    assert res['status'] == 'already_processed'
+        with pytest.raises(InsufficientCreditsError):
+            await service.deduct_credits(test_user_id, 10, "Test usage")
 
+    async def test_deduct_credits_invalid_amount(self, mock_billing_repo, mock_user_repo, test_user_id):
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+        with pytest.raises(ValidationError, match="Credit amount must be positive"):
+            await service.deduct_credits(test_user_id, 0, "Invalid amount")
 
-@pytest.mark.asyncio
-async def test_handle_webhook_invalid_signature(service):
-    service.gateway.construct_event.side_effect = AuthenticationError('bad sig')
-    with pytest.raises(AuthenticationError):
-        await service.handle_webhook('p', 's')
+    async def test_add_credits_success(self, mock_billing_repo, mock_user_repo, test_user_id):
+        initial_balance = 50
+        mock_user_repo.get_user_profile.return_value = {"user_id": str(test_user_id), "credits_remaining": initial_balance}
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
 
+        await service.add_credits(user_id=test_user_id, credit_amount=100, description="Test purchase")
+
+        mock_user_repo.update_credits.assert_called_once_with(str(test_user_id), 150)
+        mock_billing_repo.create_transaction.assert_awaited_once()
 
 @pytest.mark.asyncio
-async def test_create_portal_session_success(service, mock_user_repo, mock_audit_repo):
-    user_id = uuid4()
-    mock_user_repo.get_user_profile.return_value = {'stripe_customer_id': 'cus_portal'}
-    fake = MagicMock(url='http://portal')
-    service.gateway.create_portal_session.return_value = fake
+@patch('app.services.billing_service.settings.enable_stripe', True)
+@patch('app.services.billing_service.settings.stripe_secret_key', 'sk_test_123')
+@patch('app.services.billing_service.StripeClient')
+class TestPaymentProcessing:
+    """Tests for payment processing, from checkout to fulfillment."""
 
-    res = await service.create_portal_session(user_id)
-    service.gateway.create_portal_session.assert_called_once()
-    mock_audit_repo.log_event.assert_awaited_once_with(str(user_id), 'portal_session_created', {})
-    assert res == {'portal_url': 'http://portal'}
+    async def test_create_checkout_session_success(self, MockStripe, mock_billing_repo, mock_user_repo, test_user_id):
+        mock_user_repo.get_user_profile.return_value = {"user_id": str(test_user_id), "email": "test@example.com", "stripe_customer_id": "cus_123"}
+        mock_stripe_instance = MockStripe.return_value
+        mock_stripe_instance.create_checkout_session = AsyncMock(return_value={"id": "cs_test_123", "url": "http://test.com"})
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+        
+        session = await service.create_checkout_session(test_user_id, 'pro')
 
+        assert isinstance(session, CheckoutSession)
+        mock_stripe_instance.create_checkout_session.assert_awaited_once()
 
-@pytest.mark.asyncio
-async def test_create_portal_session_not_found(service, mock_user_repo):
-    user_id = uuid4()
-    mock_user_repo.get_user_profile.return_value = None
-    with pytest.raises(NotFoundError):
-        await service.create_portal_session(user_id)
+    async def test_create_checkout_session_user_not_found(self, MockStripe, mock_billing_repo, mock_user_repo, test_user_id):
+        mock_user_repo.get_user_profile.return_value = None
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+        
+        with pytest.raises(NotFoundError):
+            await service.create_checkout_session(test_user_id, 'pro')
 
+    async def test_handle_payment_success(self, MockStripe, mock_billing_repo, mock_user_repo, test_user_id):
+        session_id = "cs_test_123"
+        package = settings.get_credit_package_by_key('pro')
+        mock_billing_repo.find_transaction_by_reference.return_value = None
+        mock_stripe_instance = MockStripe.return_value
+        mock_stripe_instance.get_checkout_session = AsyncMock(return_value={"id": session_id, "metadata": {"user_id": str(test_user_id), "package_key": "pro", "credits": str(package.credits)}})
+        
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+        service.add_credits = AsyncMock()
 
-@pytest.mark.asyncio
-async def test_get_user_billing_history(service, mock_billing_repo):
-    user_id = uuid4()
-    mock_billing_repo.get_transactions_for_user.return_value = [{'id': 't1'}]
-    res = await service.get_user_billing_history(user_id)
-    mock_billing_repo.get_transactions_for_user.assert_awaited_once_with(user_id=user_id, limit=50)
-    assert res == [{'id': 't1'}]
+        await service.handle_payment_success(session_id)
 
+        mock_stripe_instance.get_checkout_session.assert_awaited_once_with(session_id)
+        mock_billing_repo.find_transaction_by_reference.assert_awaited_once_with(session_id, "stripe_checkout")
+        service.add_credits.assert_awaited_once()
 
-@pytest.mark.asyncio
-async def test_add_promotional_credits(service, mock_user_repo, mock_billing_repo, mock_audit_repo):
-    user_id = uuid4()
-    mock_user_repo.get_user_profile.return_value = {'credits_remaining': 5}
-    txn = {'transaction_type': 'bonus', 'credit_amount': 20}
-    mock_billing_repo.add_credits.return_value = txn
-    mock_user_repo.add_credits.return_value = None
+    async def test_handle_payment_success_idempotency(self, MockStripe, mock_billing_repo, mock_user_repo, test_user_id):
+        session_id = "cs_test_idempotent_456"
+        existing_transaction = MagicMock(spec=TransactionRecord)
+        mock_stripe_instance = MockStripe.return_value
+        mock_stripe_instance.get_checkout_session = AsyncMock(return_value={"id": session_id, "metadata": {"user_id": str(test_user_id), "package_key": "pro", "credits": "1000"}})
+        mock_billing_repo.find_transaction_by_reference.return_value = existing_transaction
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+        service.add_credits = AsyncMock()
 
-    res = await service.add_promotional_credits(user_id, 20, 'promo')
-    mock_billing_repo.add_credits.assert_awaited_once()
-    mock_user_repo.add_credits.assert_called_once_with(str(user_id), 20, 'promo')
-    mock_audit_repo.log_event.assert_awaited_once_with(str(user_id), 'promotional_credits_added', {'credits': 20})
-    assert res == txn
+        result_transaction = await service.handle_payment_success(session_id)
 
-
-@pytest.mark.asyncio
-async def test_add_promotional_credits_invalid(service):
-    with pytest.raises(ValidationError):
-        await service.add_promotional_credits(uuid4(), 0, 'promo')
-
-
-@pytest.mark.asyncio
-async def test_deduct_manual_credits(service, mock_user_repo, mock_billing_repo, mock_audit_repo):
-    user_id = uuid4()
-    mock_user_repo.get_user_profile.return_value = {'credits_remaining': 50}
-    txn = {'transaction_type': 'adjustment', 'credit_amount': -10}
-    mock_billing_repo.deduct_credits.return_value = txn
-    mock_user_repo.deduct_credits.return_value = None
-
-    res = await service.deduct_manual_credits(user_id, 10, 'adj')
-    mock_billing_repo.deduct_credits.assert_awaited_once()
-    mock_user_repo.deduct_credits.assert_called_once_with(str(user_id), 10, 'adj')
-    mock_audit_repo.log_event.assert_awaited_once_with(str(user_id), 'manual_credits_deducted', {'credits': 10})
-    assert res == txn
-
+        service.add_credits.assert_not_awaited()
+        assert result_transaction is existing_transaction
 
 @pytest.mark.asyncio
-async def test_deduct_manual_credits_insufficient(service, mock_user_repo):
-    user_id = uuid4()
-    mock_user_repo.get_user_profile.return_value = {'credits_remaining': 5}
-    with pytest.raises(ValidationError):
-        await service.deduct_manual_credits(user_id, 10, 'adj')
+@patch('app.services.billing_service.settings.enable_stripe', True)
+@patch('app.services.billing_service.settings.stripe_secret_key', 'sk_test_123')
+@patch('app.services.billing_service.StripeClient')
+class TestWebhookProcessing:
+    """Tests for handling incoming Stripe webhooks."""
 
+    async def test_process_stripe_webhook_success(self, MockStripe, mock_billing_repo, mock_user_repo):
+        payload = '{"id": "evt_123", "type": "checkout.session.completed", "data": {"object": {"id": "cs_123", "payment_status": "paid"}}}'
+        signature = "sig_123"
+        mock_stripe_instance = MockStripe.return_value
+        mock_stripe_instance.construct_webhook_event.return_value = {"id": "evt_123", "type": "checkout.session.completed", "data": {"object": {"id": "cs_123", "payment_status": "paid"}}}
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+        
+        mock_transaction = MagicMock(spec=TransactionRecord)
+        mock_transaction.id = uuid4()
+        mock_transaction.credit_amount = 1000
+        service.handle_payment_success = AsyncMock(return_value=mock_transaction)
+
+        event = await service.process_stripe_webhook(payload, signature)
+
+        assert event.success is True
+        assert event.event_type == "checkout.session.completed"
+        service.handle_payment_success.assert_awaited_once_with("cs_123")
+
+    async def test_process_stripe_webhook_unhandled_event(self, MockStripe, mock_billing_repo, mock_user_repo):
+        payload = '{"id": "evt_123", "type": "customer.created", "data": {}}'
+        signature = "sig_123"
+        mock_stripe_instance = MockStripe.return_value
+        mock_stripe_instance.construct_webhook_event.return_value = {"id": "evt_123", "type": "customer.created", "data": {}}
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+        service.handle_payment_success = AsyncMock()
+
+        event = await service.process_stripe_webhook(payload, signature)
+
+        assert event.success is False
+        assert "unhandled_event_type" in event.result["reason"]
+        service.handle_payment_success.assert_not_awaited()
+
+    async def test_process_stripe_webhook_invalid_signature(self, MockStripe, mock_billing_repo, mock_user_repo):
+        mock_stripe_instance = MockStripe.return_value
+        mock_stripe_instance.construct_webhook_event.side_effect = WebhookValidationError("Invalid signature")
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+
+        with pytest.raises(WebhookValidationError):
+            await service.process_stripe_webhook("payload", "bad_sig")
 
 @pytest.mark.asyncio
-async def test_handle_webhook_other_event(service, mock_billing_repo):
-    event = {'type': 'customer.created', 'data': {'object': {}}}
-    service.gateway.construct_event = MagicMock(return_value=event)
-    res = await service.handle_webhook('p', 's')
-    assert res == {'status': 'ignored', 'event_type': 'customer.created'}
+class TestHistoryAndAnalytics:
+    """Tests for retrieving billing history and analytics."""
+
+    async def test_get_billing_history(self, mock_billing_repo, mock_user_repo, test_user_id):
+        mock_user_repo.get_user_profile.return_value = {"user_id": str(test_user_id), "credits_remaining": 100}
+        mock_transaction = MagicMock(spec=TransactionRecord)
+        mock_transaction.transaction_type = 'purchase'
+        mock_transaction.credit_amount = 1000
+        mock_transaction.usd_amount = 40.0
+        mock_transaction.created_at = datetime.utcnow()
+        mock_billing_repo.list_transactions_for_user.return_value = [mock_transaction]
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+
+        history = await service.get_billing_history(test_user_id)
+
+        assert isinstance(history, BillingHistory)
+        assert len(history.transactions) == 1
+        mock_billing_repo.list_transactions_for_user.assert_awaited_once_with(test_user_id, 50)
+
+@pytest.mark.asyncio
+class TestAdminFunctions:
+    """Tests for administrative billing functions."""
+
+    async def test_create_bonus_credits(self, mock_billing_repo, mock_user_repo, test_user_id):
+        service = BillingService(billing_repo=mock_billing_repo, user_repo=mock_user_repo)
+        service.add_credits = AsyncMock()
+
+        await service.create_bonus_credits(user_id=test_user_id, credit_amount=500, description="Welcome bonus")
+
+        service.add_credits.assert_awaited_once_with(
+            user_id=test_user_id,
+            credit_amount=500,
+            description="Welcome bonus",
+            reference_id=None,
+            reference_type="bonus"
+        )

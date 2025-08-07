@@ -18,6 +18,7 @@ from app.core.exceptions import ValidationError, NotFoundError
 from app.data.repositories.user_repository import UserRepository
 from app.data.repositories.email_repository import EmailRepository
 from app.data.repositories.gmail_repository import GmailRepository
+from app.data.repositories.billing_repository import BillingRepository
 from app.services.billing_service import BillingService
 
 logger = logging.getLogger(__name__)
@@ -32,11 +33,13 @@ class UserService:
         self,
         user_repository: UserRepository,
         billing_service: BillingService,
+        billing_repository: BillingRepository,
         email_repository: EmailRepository,
         gmail_repository: GmailRepository
     ):
         self.user_repository = user_repository
         self.billing_service = billing_service
+        self.billing_repository = billing_repository
         self.email_repository = email_repository
         self.gmail_repository = gmail_repository
         

@@ -2,6 +2,8 @@
 """
 Authentication routes for user login, registration, and JWT management.
 Handles Supabase JWT tokens and user profile creation.
+
+Fixed to use proper dependency injection instead of manual service creation.
 """
 import logging
 from typing import Dict, Any, Optional
@@ -17,21 +19,30 @@ from app.api.dependencies import (
 )
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
-from app.data.repositories.user_repository import UserRepository
+from app.core.container import get_user_repository, get_billing_service
 from app.core.exceptions import AuthenticationError, ValidationError, NotFoundError
 
 logger = logging.getLogger(__name__)
 
-# Initialize services
-user_repository = UserRepository()
-auth_service = AuthService(user_repository)
-user_service = UserService(
-    user_repository=user_repository,
-    billing_service=None,  # Will be injected when needed
-    billing_repository=None,
-    email_repository=None,
-    gmail_repository=None
-)
+# --- Service Factory Functions ---
+
+def get_auth_service():
+    """Get auth service with proper dependencies"""
+    return AuthService(get_user_repository())
+
+def get_user_service():
+    """Get user service with all dependencies properly injected"""
+    from app.data.repositories.email_repository import EmailRepository
+    from app.data.repositories.gmail_repository import GmailRepository
+    from app.data.repositories.billing_repository import BillingRepository
+    
+    return UserService(
+        user_repository=get_user_repository(),
+        billing_service=get_billing_service(),
+        billing_repository=BillingRepository(),
+        email_repository=EmailRepository(),
+        gmail_repository=GmailRepository()
+    )
 
 router = APIRouter(
     prefix="/auth",
@@ -42,13 +53,11 @@ router = APIRouter(
     }
 )
 
-
 # --- Request/Response Models ---
 
 class TokenRequest(BaseModel):
     """Request model for token validation"""
-    token: str = Field(..., description="JWT token to validate")
-
+    token: str = Field(..., min_length=1, description="JWT token to validate")
 
 class TokenResponse(BaseModel):
     """Response model for token validation"""
@@ -56,7 +65,6 @@ class TokenResponse(BaseModel):
     user_id: Optional[str] = Field(None, description="User ID if token is valid")
     email: Optional[str] = Field(None, description="User email if token is valid")
     expires_at: Optional[str] = Field(None, description="Token expiration time")
-
 
 class UserProfileResponse(BaseModel):
     """Response model for user profile"""
@@ -69,12 +77,10 @@ class UserProfileResponse(BaseModel):
     created_at: str
     permissions: Dict[str, bool]
 
-
 class LoginRequest(BaseModel):
     """Request model for login (for testing/development)"""
     email: EmailStr = Field(..., description="User email address")
     password: str = Field(..., min_length=8, description="User password")
-
 
 class RegisterRequest(BaseModel):
     """Request model for registration"""
@@ -82,14 +88,12 @@ class RegisterRequest(BaseModel):
     display_name: Optional[str] = Field(None, description="User display name")
     timezone: str = Field("UTC", description="User timezone")
 
-
 class SessionRequest(BaseModel):
     """Request model for session creation"""
     access_token: str = Field(..., description="Supabase access token")
     refresh_token: Optional[str] = Field(None, description="Supabase refresh token")
     token_type: str = Field("bearer", description="Token type")
     expires_in: int = Field(3600, description="Token expiration in seconds")
-
 
 class SessionResponse(BaseModel):
     """Response model for session creation"""
@@ -99,12 +103,12 @@ class SessionResponse(BaseModel):
     needs_gmail: bool = False
     message: str
 
-
 # --- Authentication Endpoints ---
 
 @router.post("/validate-token", response_model=TokenResponse)
 async def validate_token(
-    request: TokenRequest
+    request: TokenRequest,
+    auth_service: AuthService = Depends(get_auth_service)
 ) -> TokenResponse:
     """
     Validate a JWT token and return user info.
@@ -118,9 +122,9 @@ async def validate_token(
         
         return TokenResponse(
             valid=True,
-            user_id=token_data.get("user_id"),
-            email=token_data.get("email"),
-            expires_at=token_data.get("expires_at")
+            user_id=str(token_data.get("user_id")) if token_data.get("user_id") else None,
+            email=str(token_data.get("email")) if token_data.get("email") else None,
+            expires_at=str(token_data.get("expires_at")) if token_data.get("expires_at") else None
         )
     
     except AuthenticationError as e:
@@ -131,17 +135,17 @@ async def validate_token(
         logger.error(f"Token validation error: {e}")
         return TokenResponse(valid=False)
 
-
 @router.get("/me", response_model=UserProfileResponse)
 async def get_current_user_profile(
-    context: UserContext = Depends(get_user_context)
+    context: UserContext = Depends(get_user_context),
+    user_service: UserService = Depends(get_user_service)
 ) -> UserProfileResponse:
     """
     Get current user profile information.
     Returns user data and permissions.
     """
     try:
-        # Get full user profile
+        # Get full user profile with proper error handling
         user_profile = await user_service.get_user_profile(context.user_id)
         
         return UserProfileResponse(
@@ -165,12 +169,18 @@ async def get_current_user_profile(
             status_code=404,
             detail="User profile not found"
         )
-
+    except Exception as e:
+        logger.error(f"Failed to get user profile for {context.user_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve user profile"
+        )
 
 @router.post("/create-session", response_model=SessionResponse)
 async def create_session(
     request: SessionRequest,
-    http_request: Request
+    http_request: Request,
+    auth_service: AuthService = Depends(get_auth_service)
 ) -> SessionResponse:
     """
     Create a user session from Supabase tokens.
@@ -236,17 +246,17 @@ async def create_session(
             detail="Failed to create session"
         )
 
-
 @router.post("/logout")
 async def logout(
-    context: UserContext = Depends(get_user_context)
+    context: UserContext = Depends(get_user_context),
+    auth_service: AuthService = Depends(get_auth_service)
 ) -> Dict[str, Any]:
     """
     Log out current user and invalidate sessions.
     """
     try:
         # Invalidate all user sessions
-        result = auth_service.invalidate_all_user_sessions(context.user_id)
+        result = await auth_service.invalidate_all_user_sessions(context.user_id)
         
         # Log logout
         auth_service.audit_log_authentication(
@@ -266,12 +276,11 @@ async def logout(
         }
     
     except Exception as e:
-        logger.error(f"Logout error: {e}")
+        logger.error(f"Logout error for user {context.user_id}: {e}")
         raise HTTPException(
             status_code=500,
             detail="Failed to logout"
         )
-
 
 @router.post("/refresh")
 async def refresh_token(
@@ -298,19 +307,19 @@ async def refresh_token(
         }
     
     except Exception as e:
-        logger.error(f"Token refresh error: {e}")
+        logger.error(f"Token refresh error for user {context.user_id}: {e}")
         raise HTTPException(
             status_code=500,
             detail="Failed to refresh token"
         )
-
 
 # --- Development/Testing Endpoints ---
 
 @router.post("/login", response_model=Dict[str, Any])
 async def login_for_testing(
     request: LoginRequest,
-    http_request: Request
+    http_request: Request,
+    auth_service: AuthService = Depends(get_auth_service)
 ) -> Dict[str, Any]:
     """
     Login endpoint for testing/development.
@@ -365,10 +374,10 @@ async def login_for_testing(
             detail="Login failed"
         )
 
-
 @router.post("/register", response_model=Dict[str, Any])
 async def register_for_testing(
-    request: RegisterRequest
+    request: RegisterRequest,
+    user_service: UserService = Depends(get_user_service)
 ) -> Dict[str, Any]:
     """
     Registration endpoint for testing/development.
@@ -415,12 +424,12 @@ async def register_for_testing(
             detail="Registration failed"
         )
 
-
 # --- Session Management ---
 
 @router.get("/sessions")
 async def get_user_sessions(
-    context: UserContext = Depends(get_user_context)
+    context: UserContext = Depends(get_user_context),
+    auth_service: AuthService = Depends(get_auth_service)
 ) -> Dict[str, Any]:
     """
     Get all active sessions for current user.
@@ -446,17 +455,17 @@ async def get_user_sessions(
         }
     
     except Exception as e:
-        logger.error(f"Get sessions error: {e}")
+        logger.error(f"Get sessions error for user {context.user_id}: {e}")
         raise HTTPException(
             status_code=500,
             detail="Failed to get sessions"
         )
 
-
 @router.delete("/sessions/{session_id}")
 async def invalidate_session(
     session_id: str,
-    context: UserContext = Depends(get_user_context)
+    context: UserContext = Depends(get_user_context),
+    auth_service: AuthService = Depends(get_auth_service)
 ) -> Dict[str, Any]:
     """
     Invalidate a specific session.
@@ -496,12 +505,12 @@ async def invalidate_session(
             detail="Failed to invalidate session"
         )
 
-
 # --- Security Endpoints ---
 
 @router.get("/audit-log")
 async def get_user_audit_log(
     context: UserContext = Depends(get_user_context),
+    auth_service: AuthService = Depends(get_auth_service),
     limit: int = 50
 ) -> Dict[str, Any]:
     """
@@ -521,12 +530,11 @@ async def get_user_audit_log(
         }
     
     except Exception as e:
-        logger.error(f"Get audit log error: {e}")
+        logger.error(f"Get audit log error for user {context.user_id}: {e}")
         raise HTTPException(
             status_code=500,
             detail="Failed to get audit log"
         )
-
 
 @router.post("/change-password")
 async def change_password(
@@ -548,12 +556,11 @@ async def change_password(
         }
     
     except Exception as e:
-        logger.error(f"Change password error: {e}")
+        logger.error(f"Change password error for user {context.user_id}: {e}")
         raise HTTPException(
             status_code=500,
             detail="Password change failed"
         )
-
 
 # --- Public Endpoints ---
 
@@ -583,10 +590,10 @@ async def auth_status(
             "message": "No valid authentication token provided"
         }
 
-
 @router.get("/health")
 async def auth_health(
-    _: bool = Depends(no_auth_required)
+    _: bool = Depends(no_auth_required),
+    auth_service: AuthService = Depends(get_auth_service)
 ) -> Dict[str, Any]:
     """
     Health check for authentication service.

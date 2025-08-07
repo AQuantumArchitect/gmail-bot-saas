@@ -2,6 +2,8 @@
 """
 Health check routes for monitoring and system status.
 Public endpoints that don't require authentication.
+
+Fixed to remove dependency on potentially problematic database imports.
 """
 import logging
 from datetime import datetime
@@ -10,7 +12,6 @@ from fastapi import APIRouter, Depends, Request
 
 from app.api.dependencies import no_auth_required
 from app.core.config import settings
-from app.data.database import db
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +55,9 @@ async def detailed_health_check(
     health_status = "healthy"
     checks = {}
     
-    # Check database connectivity
+    # Check database connectivity (mock for now to avoid import issues)
     try:
-        # Simple database connection test
-        # In a real implementation, this would test the actual database
+        # Simple database connection test (mocked)
         db_status = "healthy"
         db_response_time = 0.001  # Mock response time
         checks["database"] = {
@@ -115,9 +115,9 @@ async def readiness_check(
     checks = {}
     ready = True
     
-    # Check if database is ready
+    # Check if database is ready (mock)
     try:
-        # Test database connectivity
+        # Test database connectivity (mocked)
         db_ready = True  # Mock check
         checks["database"] = {"ready": db_ready}
     except Exception as e:
@@ -258,17 +258,17 @@ def _check_configuration() -> Dict[str, Any]:
     
     # Check required environment variables
     required_vars = [
-        "DATABASE_URL",
-        "GOOGLE_CLIENT_ID",
-        "GOOGLE_CLIENT_SECRET",
-        "ANTHROPIC_API_KEY",
-        "WEBAPP_URL"
+        "database_url",
+        "google_client_id", 
+        "google_client_secret",
+        "anthropic_api_key",
+        "webapp_url"
     ]
     
     missing_vars = []
     for var in required_vars:
-        if not getattr(settings, var.lower().replace("_", ""), None):
-            missing_vars.append(var)
+        if not getattr(settings, var, None):
+            missing_vars.append(var.upper())
     
     if missing_vars:
         config_status = "unhealthy"
@@ -276,7 +276,7 @@ def _check_configuration() -> Dict[str, Any]:
     
     # Check optional configurations
     warnings = []
-    if settings.enable_stripe and not settings.stripe_secret_key:
+    if settings.enable_stripe and not getattr(settings, 'stripe_secret_key', None):
         warnings.append("Stripe enabled but no secret key provided")
     
     return {

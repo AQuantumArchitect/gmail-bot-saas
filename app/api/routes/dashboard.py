@@ -3,6 +3,7 @@
 Dashboard routes for user dashboard data and settings.
 Provides all the data needed for the user dashboard interface.
 """
+
 import logging
 from typing import Dict, Any, Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,38 +15,50 @@ from app.api.dependencies import (
     UserContext
 )
 from app.services.user_service import UserService
-from app.services.email_service import EmailService
 from app.services.gmail_service import GmailService
-from app.services.billing_service import BillingService
-from app.data.repositories.user_repository import UserRepository
-from app.data.repositories.email_repository import EmailRepository
-from app.data.repositories.gmail_repository import GmailRepository
-from app.data.repositories.billing_repository import BillingRepository
 from app.core.exceptions import NotFoundError, ValidationError
+from app.core.container import get_user_repository, get_billing_service
 
 logger = logging.getLogger(__name__)
 
-# Initialize services
-user_repository = UserRepository()
-email_repository = EmailRepository()
-gmail_repository = GmailRepository()
-billing_repository = BillingRepository()
+# --- Service Factory Functions ---
 
-user_service = UserService(
-    user_repository=user_repository,
-    billing_service=None,  # Will be injected when needed
-    billing_repository=billing_repository,
-    email_repository=email_repository,
-    gmail_repository=gmail_repository
-)
+def get_user_service():
+    """Get user service with all dependencies properly injected"""
+    from app.data.repositories.email_repository import EmailRepository
+    from app.data.repositories.gmail_repository import GmailRepository
+    from app.data.repositories.billing_repository import BillingRepository
+    
+    return UserService(
+        user_repository=get_user_repository(),
+        billing_service=get_billing_service(),
+        billing_repository=BillingRepository(),
+        email_repository=EmailRepository(),
+        gmail_repository=GmailRepository()
+    )
 
-gmail_service = GmailService(
-    gmail_repository=gmail_repository,
-    user_repository=user_repository,
-    email_repository=email_repository,
-    job_repository=None,  # Will be injected when needed
-    oauth_service=None   # Will be injected when needed
-)
+def get_gmail_service():
+    """Get gmail service with dependencies"""
+    from app.data.repositories.email_repository import EmailRepository
+    from app.data.repositories.gmail_repository import GmailRepository
+    from app.services.gmail_oauth_service import GmailOAuthService
+    
+    gmail_repo = GmailRepository()
+    user_repo = get_user_repository()
+    email_repo = EmailRepository()
+    
+    oauth_service = GmailOAuthService(
+        gmail_repository=gmail_repo,
+        user_repository=user_repo
+    )
+    
+    return GmailService(
+        gmail_repository=gmail_repo,
+        user_repository=user_repo,
+        email_repository=email_repo,
+        job_repository=None,  # Would be injected in full implementation
+        oauth_service=oauth_service
+    )
 
 router = APIRouter(
     prefix="/dashboard",
@@ -55,7 +68,6 @@ router = APIRouter(
         404: {"description": "Resource not found"}
     }
 )
-
 
 # --- Request/Response Models ---
 
@@ -69,7 +81,6 @@ class DashboardDataResponse(BaseModel):
     recent_activity: List[Dict[str, Any]]
     timestamp: str
 
-
 class BotStatusResponse(BaseModel):
     """Bot status response"""
     bot_enabled: bool
@@ -78,7 +89,6 @@ class BotStatusResponse(BaseModel):
     status: str
     processing_frequency: str
     last_processing: Optional[str] = None
-
 
 class EmailStatsResponse(BaseModel):
     """Email statistics response"""
@@ -89,29 +99,38 @@ class EmailStatsResponse(BaseModel):
     credits_used: int
     avg_processing_time: float
 
-
-class PreferencesUpdateRequest(BaseModel):
-    """Request model for updating preferences"""
+class UserSettingsRequest(BaseModel):
+    """Request model for updating user settings"""
     email_filters: Optional[Dict[str, Any]] = None
     ai_preferences: Optional[Dict[str, Any]] = None
     processing_frequency: Optional[str] = None
     timezone: Optional[str] = None
 
+class UserSettingsResponse(BaseModel):
+    """Response model for user settings"""
+    user_id: str
+    bot_enabled: bool
+    timezone: str
+    email_filters: Dict[str, Any]
+    ai_preferences: Dict[str, Any]
+    processing_frequency: str
+    updated_at: str
 
 class BotToggleRequest(BaseModel):
     """Request model for toggling bot status"""
     enabled: bool = Field(..., description="Whether to enable or disable the bot")
 
-
-# --- Dashboard Data Endpoints ---
+# --- Dashboard Endpoints ---
 
 @router.get("/data", response_model=DashboardDataResponse)
 async def get_dashboard_data(
-    context: UserContext = Depends(require_dashboard_access)
+    context: UserContext = Depends(require_dashboard_access),
+    user_service: UserService = Depends(get_user_service),
+    gmail_service: GmailService = Depends(get_gmail_service)
 ) -> DashboardDataResponse:
     """
-    Get complete dashboard data for the user.
-    Returns all information needed for the dashboard UI.
+    Get complete dashboard data for authenticated user.
+    Returns all data needed for the dashboard UI.
     """
     try:
         # Get comprehensive dashboard data
@@ -130,23 +149,17 @@ async def get_dashboard_data(
         )
     
     except NotFoundError as e:
-        logger.warning(f"Dashboard data not found: {e}")
-        raise HTTPException(
-            status_code=404,
-            detail=str(e)
-        )
+        logger.warning(f"Dashboard data not found for user {context.user_id}: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
     
     except Exception as e:
-        logger.error(f"Dashboard data error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to retrieve dashboard data"
-        )
-
+        logger.error(f"Dashboard data error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve dashboard data")
 
 @router.get("/status", response_model=BotStatusResponse)
 async def get_bot_status(
-    context: UserContext = Depends(require_dashboard_access)
+    context: UserContext = Depends(require_dashboard_access),
+    user_service: UserService = Depends(get_user_service)
 ) -> BotStatusResponse:
     """
     Get current bot status and configuration.
@@ -164,17 +177,14 @@ async def get_bot_status(
         )
     
     except Exception as e:
-        logger.error(f"Bot status error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get bot status"
-        )
-
+        logger.error(f"Bot status error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get bot status")
 
 @router.post("/bot/toggle")
 async def toggle_bot_status(
     request: BotToggleRequest,
-    context: UserContext = Depends(require_dashboard_access)
+    context: UserContext = Depends(require_dashboard_access),
+    user_service: UserService = Depends(get_user_service)
 ) -> Dict[str, Any]:
     """
     Enable or disable the bot for the user.
@@ -194,18 +204,15 @@ async def toggle_bot_status(
         }
     
     except Exception as e:
-        logger.error(f"Bot toggle error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to toggle bot status"
-        )
-
+        logger.error(f"Bot toggle error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to toggle bot status")
 
 # --- Statistics Endpoints ---
 
 @router.get("/stats/email", response_model=EmailStatsResponse)
 async def get_email_statistics(
-    context: UserContext = Depends(require_dashboard_access)
+    context: UserContext = Depends(require_dashboard_access),
+    user_service: UserService = Depends(get_user_service)
 ) -> EmailStatsResponse:
     """
     Get detailed email processing statistics.
@@ -223,125 +230,75 @@ async def get_email_statistics(
         )
     
     except Exception as e:
-        logger.error(f"Email stats error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get email statistics"
-        )
-
+        logger.error(f"Email stats error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get email statistics")
 
 @router.get("/stats/credits")
 async def get_credit_statistics(
-    context: UserContext = Depends(require_dashboard_access)
+    context: UserContext = Depends(require_dashboard_access),
+    user_service: UserService = Depends(get_user_service)
 ) -> Dict[str, Any]:
     """
     Get credit balance and usage statistics.
     """
     try:
-        # Get credit balance
-        balance = await user_service.get_credit_balance(context.user_id)
-        
-        # Get recent credit history
-        history = await user_service.get_credit_history(context.user_id, limit=10)
-        
-        return {
-            "current_balance": balance["credits_remaining"],
-            "last_updated": balance["last_updated"],
-            "recent_transactions": history["transactions"],
-            "total_transactions": history["total_transactions"]
-        }
+        stats = await user_service.get_user_credit_statistics(context.user_id)
+        return stats
     
     except Exception as e:
-        logger.error(f"Credit stats error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get credit statistics"
-        )
-
+        logger.error(f"Credit stats error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get credit statistics")
 
 @router.get("/stats/usage")
 async def get_usage_statistics(
     context: UserContext = Depends(require_dashboard_access),
-    days: int = Query(30, ge=1, le=90, description="Number of days to include")
+    user_service: UserService = Depends(get_user_service)
 ) -> Dict[str, Any]:
     """
-    Get usage statistics for the specified period.
+    Get overall usage statistics for user.
     """
     try:
-        # Get processing statistics
-        processing_stats = email_repository.get_processing_stats(context.user_id)
-        
-        # Get Gmail statistics
-        gmail_stats = gmail_service.get_user_gmail_statistics(context.user_id)
-        
-        return {
-            "period_days": days,
-            "email_processing": {
-                "total_processed": processing_stats.get("total_processed", 0),
-                "successful": processing_stats.get("total_successful", 0),
-                "failed": processing_stats.get("total_failed", 0),
-                "success_rate": processing_stats.get("success_rate", 0.0),
-                "avg_processing_time": processing_stats.get("average_processing_time", 0.0)
-            },
-            "gmail_integration": {
-                "connection_status": gmail_stats.get("connection_status", "not_connected"),
-                "total_discovered": gmail_stats.get("total_discovered", 0),
-                "total_processed": gmail_stats.get("total_processed", 0)
-            },
-            "credits": {
-                "total_used": processing_stats.get("total_credits_used", 0),
-                "remaining": context.credits_remaining
-            }
-        }
+        stats = await user_service.get_user_usage_statistics(context.user_id)
+        return stats
     
     except Exception as e:
-        logger.error(f"Usage stats error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get usage statistics"
-        )
-
+        logger.error(f"Usage stats error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get usage statistics")
 
 # --- Settings Endpoints ---
 
-@router.get("/settings")
+@router.get("/settings", response_model=UserSettingsResponse)
 async def get_user_settings(
-    context: UserContext = Depends(require_dashboard_access)
-) -> Dict[str, Any]:
+    context: UserContext = Depends(require_dashboard_access),
+    user_service: UserService = Depends(get_user_service)
+) -> UserSettingsResponse:
     """
     Get user settings and preferences.
     """
     try:
-        # Get user preferences
-        preferences = await user_service.get_user_preferences(context.user_id)
-        
-        # Get user profile for additional settings
         profile = await user_service.get_user_profile(context.user_id)
         
-        return {
-            "user_profile": {
-                "display_name": profile.get("display_name"),
-                "timezone": profile.get("timezone"),
-                "email": profile.get("email")
-            },
-            "email_filters": preferences["email_filters"],
-            "ai_preferences": preferences["ai_preferences"],
-            "processing_frequency": preferences["processing_frequency"],
-            "bot_enabled": profile.get("bot_enabled", False)
-        }
-    
-    except Exception as e:
-        logger.error(f"Get settings error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get user settings"
+        return UserSettingsResponse(
+            user_id=context.user_id,
+            bot_enabled=profile.get("bot_enabled", False),
+            timezone=profile.get("timezone", "UTC"),
+            email_filters=profile.get("email_filters", {}),
+            ai_preferences=profile.get("ai_preferences", {}),
+            processing_frequency=profile.get("processing_frequency", "daily"),
+            updated_at=profile.get("updated_at", "")
         )
+    
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="User settings not found")
+    except Exception as e:
+        logger.error(f"Get settings error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get user settings")
 
-
-@router.put("/settings")
+@router.put("/settings", response_model=Dict[str, Any])
 async def update_user_settings(
-    request: PreferencesUpdateRequest,
-    context: UserContext = Depends(require_dashboard_access)
+    request: UserSettingsRequest,
+    context: UserContext = Depends(require_dashboard_access),
+    user_service: UserService = Depends(get_user_service)
 ) -> Dict[str, Any]:
     """
     Update user settings and preferences.
@@ -390,23 +347,17 @@ async def update_user_settings(
         }
     
     except ValidationError as e:
-        logger.warning(f"Settings validation error: {e}")
-        raise HTTPException(
-            status_code=422,
-            detail=str(e)
-        )
+        logger.warning(f"Settings validation error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=422, detail=str(e))
     
     except Exception as e:
-        logger.error(f"Update settings error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to update settings"
-        )
-
+        logger.error(f"Update settings error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update settings")
 
 @router.post("/settings/reset")
 async def reset_settings_to_default(
-    context: UserContext = Depends(require_dashboard_access)
+    context: UserContext = Depends(require_dashboard_access),
+    user_service: UserService = Depends(get_user_service)
 ) -> Dict[str, Any]:
     """
     Reset user settings to default values.
@@ -423,90 +374,51 @@ async def reset_settings_to_default(
         }
     
     except Exception as e:
-        logger.error(f"Reset settings error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to reset settings"
-        )
-
+        logger.error(f"Reset settings error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to reset settings")
 
 # --- Activity Endpoints ---
 
 @router.get("/activity")
 async def get_recent_activity(
     context: UserContext = Depends(require_dashboard_access),
+    user_service: UserService = Depends(get_user_service),
     limit: int = Query(20, ge=1, le=100, description="Number of activities to return")
 ) -> Dict[str, Any]:
     """
     Get recent user activity.
     """
     try:
-        # Get recent processing history
-        processing_history = email_repository.get_processing_history(
-            context.user_id, 
-            limit=limit
-        )
-        
-        # Get recent credit transactions
-        credit_history = await user_service.get_credit_history(
-            context.user_id, 
-            limit=5
-        )
-        
-        # Combine and format activities
-        activities = []
-        
-        # Add processing activities
-        for item in processing_history:
-            activities.append({
-                "type": "email_processed",
-                "timestamp": item.get("processing_completed_at"),
-                "description": f"Processed email: {item.get('subject', 'Unknown')}",
-                "status": item.get("status"),
-                "credits_used": item.get("processing_result", {}).get("credits_used", 0)
-            })
-        
-        # Add credit activities
-        for item in credit_history["transactions"][:5]:
-            activities.append({
-                "type": "credit_transaction",
-                "timestamp": item.get("created_at"),
-                "description": item.get("description"),
-                "amount": item.get("credit_amount"),
-                "transaction_type": item.get("transaction_type")
-            })
-        
-        # Sort by timestamp
-        activities.sort(key=lambda x: x["timestamp"] or "", reverse=True)
+        activities = await user_service.get_user_recent_activity(context.user_id, limit=limit)
         
         return {
-            "activities": activities[:limit],
-            "total_activities": len(activities)
+            "success": True,
+            "activities": activities,
+            "total_returned": len(activities)
         }
     
     except Exception as e:
-        logger.error(f"Get activity error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get recent activity"
-        )
+        logger.error(f"Recent activity error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get recent activity")
 
-
-# --- System Health for User ---
+# --- Health Check ---
 
 @router.get("/health")
 async def get_user_system_health(
-    context: UserContext = Depends(require_dashboard_access)
+    context: UserContext = Depends(require_dashboard_access),
+    gmail_service: GmailService = Depends(get_gmail_service)
 ) -> Dict[str, Any]:
     """
-    Get system health status from user's perspective.
+    Get system health status for current user.
     """
     try:
         # Get Gmail connection status
-        gmail_stats = gmail_service.get_user_gmail_statistics(context.user_id)
+        gmail_stats = await gmail_service.get_user_gmail_statistics(context.user_id)
         gmail_healthy = gmail_stats.get("connection_status") == "connected"
         
-        # Get processing queue status
+        # Get processing queue status (mock implementation)
+        from app.data.repositories.email_repository import EmailRepository
+        email_repository = EmailRepository()
         processing_stats = email_repository.get_processing_stats(context.user_id)
         processing_healthy = processing_stats.get("total_pending", 0) < 10
         
@@ -533,12 +445,8 @@ async def get_user_system_health(
         }
     
     except Exception as e:
-        logger.error(f"User health check error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get system health"
-        )
-
+        logger.error(f"User health check error for user {context.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get system health")
 
 # --- Example Usage ---
 

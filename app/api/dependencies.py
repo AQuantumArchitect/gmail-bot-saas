@@ -2,6 +2,8 @@
 """
 FastAPI dependencies for authentication, user context, and permission checking.
 Provides clean injection of user context into route handlers.
+
+Fixed to use dependency injection container instead of manual service creation.
 """
 import logging
 from typing import Optional, Dict, Any
@@ -9,27 +11,16 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.core.exceptions import AuthenticationError, NotFoundError, ValidationError
-from app.core.container import get_billing_service as _get_billing_service
-from app.services.auth_service import AuthService
-from app.services.user_service import UserService
-from app.data.repositories.user_repository import UserRepository
-
+from app.core.container import (
+    get_billing_service,
+    get_user_repository,
+    get_billing_repository
+)
 
 logger = logging.getLogger(__name__)
 
 # Security scheme for JWT tokens
 security = HTTPBearer(auto_error=False)
-
-# Global service instances (would be properly injected in production)
-user_repository = UserRepository()
-auth_service = AuthService(user_repository)
-user_service = UserService(
-    user_repository=user_repository,
-    billing_service=None,  # Will be injected when needed
-    billing_repository=None,
-    email_repository=None,
-    gmail_repository=None
-)
 
 
 class UserContext:
@@ -75,6 +66,44 @@ class UserContext:
         }
 
 
+# --- Service Dependencies ---
+
+def get_user_repository_dependency():
+    """Get user repository from container"""
+    return get_user_repository()
+
+
+def get_billing_repository_dependency():
+    """Get billing repository from container"""
+    return get_billing_repository()
+
+
+def get_billing_service_dependency():
+    """Get billing service from container"""
+    return get_billing_service()
+
+
+def get_auth_service():
+    """Get auth service with proper dependencies"""
+    from app.services.auth_service import AuthService
+    return AuthService(get_user_repository())
+
+
+def get_user_service():
+    """Get user service with all dependencies properly injected"""
+    from app.services.user_service import UserService
+    from app.data.repositories.email_repository import EmailRepository
+    from app.data.repositories.gmail_repository import GmailRepository
+    
+    return UserService(
+        user_repository=get_user_repository(),
+        billing_service=get_billing_service(),
+        billing_repository=get_billing_repository(),
+        email_repository=EmailRepository(),  # These could also be containerized
+        gmail_repository=GmailRepository()   # These could also be containerized
+    )
+
+
 # --- Authentication Dependencies ---
 
 async def get_auth_token(
@@ -95,7 +124,8 @@ async def get_auth_token(
 
 
 async def get_current_user(
-    token: str = Depends(get_auth_token)
+    token: str = Depends(get_auth_token),
+    auth_service = Depends(get_auth_service)
 ) -> Dict[str, Any]:
     """
     Get current user from JWT token.
@@ -124,14 +154,15 @@ async def get_current_user(
 
 
 async def get_user_context(
-    user_data: Dict[str, Any] = Depends(get_current_user)
+    user_data: Dict[str, Any] = Depends(get_current_user),
+    auth_service = Depends(get_auth_service)
 ) -> UserContext:
     """
     Create user context with permissions.
     This is the main dependency for route handlers.
     """
     try:
-        # Get permissions
+        # Get permissions using auth service
         permissions = {
             "can_process_emails": auth_service.check_user_permissions(user_data, "email_processing")["allowed"],
             "can_access_dashboard": auth_service.check_user_permissions(user_data, "dashboard_access")["allowed"],
@@ -230,7 +261,8 @@ async def require_credit_purchase_permission(
 
 async def check_rate_limit(
     request: Request,
-    context: UserContext = Depends(get_user_context)
+    context: UserContext = Depends(get_user_context),
+    auth_service = Depends(get_auth_service)
 ) -> UserContext:
     """
     Check rate limits for authenticated users.
@@ -273,7 +305,8 @@ async def check_rate_limit(
 # --- Optional Dependencies ---
 
 async def get_optional_user_context(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    auth_service = Depends(get_auth_service)
 ) -> Optional[UserContext]:
     """
     Get user context if token is provided, otherwise return None.
@@ -298,20 +331,17 @@ async def get_optional_user_context(
         return None
 
 
-# --- Service Dependencies ---
+# --- Service Access Dependencies ---
 
-async def get_user_service(
+async def get_user_service_dependency(
     context: UserContext = Depends(get_user_context)
-) -> UserService:
+):
     """
-    Get UserService instance for the current user.
+    Get UserService instance with proper dependency injection.
     Useful for routes that need user-specific operations.
     """
-    return user_service
+    return get_user_service()
 
-async def get_billing_service():
-    """Get billing service with proper dependency injection"""
-    return _get_billing_service()
 
 # --- Request Context Dependencies ---
 
@@ -325,7 +355,7 @@ async def get_request_context(
     """
     return {
         "user_id": context.user_id,
-        "request_id": id(request),  # Simple request ID
+        "request_id": getattr(request.state, 'request_id', id(request)),
         "method": request.method,
         "url": str(request.url),
         "client_ip": request.client.host if request.client else "unknown",
