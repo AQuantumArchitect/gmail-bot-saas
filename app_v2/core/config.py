@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     google_client_secret: str = Field(..., validation_alias="GOOGLE_CLIENT_SECRET")
 
     # API Keys
-    anthropic_api_key: str = Field(..., validation_alias="ANTHROPIC_API_KEY")
+    anthropic_api_key: Optional[str] = Field(None, validation_alias="ANTHROPIC_API_KEY")
 
     # Web
     webapp_url: AnyHttpUrl = Field(..., validation_alias="WEBAPP_URL")
@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     enable_stripe: bool = Field(False, validation_alias="ENABLE_STRIPE")
     enable_background_processing: bool = Field(True, validation_alias="ENABLE_BACKGROUND_PROCESSING")
     enable_gmail_processing: bool = Field(True, validation_alias="ENABLE_GMAIL_PROCESSING")
+    enable_ai_processing: bool = Field(True, validation_alias="ENABLE_AI_PROCESSING")
 
     # Stripe Configuration
     stripe_secret_key: Optional[str] = Field(None, validation_alias="STRIPE_SECRET_KEY")
@@ -103,8 +104,8 @@ class Settings(BaseSettings):
         return v
 
     @field_validator("anthropic_api_key")
-    def validate_anthropic_key(cls, v: str) -> str:
-        if not v.startswith('sk-'):
+    def validate_anthropic_key(cls, v: Optional[str]) -> Optional[str]:
+        if v and not v.startswith('sk-'):
             raise ValueError('Invalid Anthropic API key')
         return v
 
@@ -123,6 +124,13 @@ class Settings(BaseSettings):
     def generate_state_secret(self) -> 'Settings':
         if self.debug_mode and not self.state_secret_key:
             self.state_secret_key = secrets.token_urlsafe(32)
+        return self
+
+    @model_validator(mode='after')
+    def check_ai_processing(self) -> 'Settings':
+        # Disable AI processing if no Anthropic key provided
+        if not self.anthropic_api_key:
+            self.enable_ai_processing = False
         return self
 
     @property
@@ -251,3 +259,6 @@ def is_background_processing_enabled() -> bool:
 
 def is_gmail_processing_enabled() -> bool:
     return settings.enable_gmail_processing
+
+def is_ai_processing_enabled() -> bool:
+    return settings.enable_ai_processing
