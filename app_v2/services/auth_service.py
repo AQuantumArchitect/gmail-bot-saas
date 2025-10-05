@@ -174,29 +174,68 @@ class AuthService:
 
     async def get_gmail_tokens(self, user_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get Gmail OAuth tokens from Supabase Vault.
+        Get Gmail OAuth tokens from Supabase Auth.
+        Uses provider_token from Supabase Auth with optional Vault fallback.
 
         Args:
             user_id: User UUID string
 
         Returns:
-            OAuth tokens from vault, or None if not found
+            OAuth tokens with access_token, or None if not found
         """
         try:
-            # Use Supabase Admin API to get user with provider tokens
-            response = await self.supabase.execute_rpc(
-                "get_user_provider_tokens",
-                {"user_uuid": user_id, "provider": "google"}
-            )
+            # Method 1: Get provider token from Supabase Auth
+            user_query = """
+            SELECT
+                raw_user_meta_data,
+                identities
+            FROM auth.users
+            WHERE id = $1
+            """
 
-            if response and "access_token" in response:
-                logger.info(f"Retrieved Gmail tokens from vault for user {user_id}")
-                return response
+            result = await self.supabase.execute_query(user_query, [user_id])
 
+            if result and len(result) > 0:
+                user_data = result[0]
+                identities = user_data.get('identities', [])
+
+                # Find Google identity with provider token
+                for identity in identities:
+                    if identity.get('provider') == 'google':
+                        # Check for provider_token or access_token
+                        access_token = (
+                            identity.get('provider_token') or
+                            identity.get('access_token')
+                        )
+
+                        if access_token:
+                            logger.info(f"✅ Found Google provider token for user {user_id}")
+                            return {
+                                'access_token': access_token,
+                                'refresh_token': identity.get('refresh_token'),
+                                'token_type': 'Bearer',
+                                'expires_in': identity.get('expires_in'),
+                                'source': 'supabase_auth'
+                            }
+
+            # Method 2: Fallback to Vault storage (if custom RPC exists)
+            try:
+                vault_result = await self.supabase.execute_rpc(
+                    "get_user_provider_tokens",
+                    {"user_uuid": user_id, "provider": "google"}
+                )
+
+                if vault_result and "access_token" in vault_result:
+                    logger.info(f"✅ Retrieved Gmail tokens from Vault for user {user_id}")
+                    return {**vault_result, 'source': 'vault'}
+            except Exception as vault_error:
+                logger.debug(f"Vault fallback failed (normal if RPC doesn't exist): {vault_error}")
+
+            logger.warning(f"⚠️ No Gmail tokens found for user {user_id}")
             return None
 
         except Exception as e:
-            logger.error(f"Failed to get Gmail tokens from vault for {user_id}: {e}")
+            logger.error(f"❌ Failed to get Gmail tokens for {user_id}: {e}")
             return None
 
     async def store_gmail_tokens(self, user_id: str, tokens: Dict[str, Any]) -> bool:

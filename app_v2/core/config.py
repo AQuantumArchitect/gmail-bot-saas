@@ -56,16 +56,13 @@ class Settings(BaseSettings):
     database_jwt_secret: str = Field(..., validation_alias="SUPABASE_JWT_SECRET")
     test_database_url: Optional[AnyHttpUrl] = Field(None, validation_alias="TEST_DATABASE_URL")
 
-    # OAuth
-    google_client_id: str = Field(..., validation_alias="GOOGLE_CLIENT_ID")
-    google_client_secret: str = Field(..., validation_alias="GOOGLE_CLIENT_SECRET")
+    # OAuth (handled by Supabase - no app-level credentials needed)
 
     # API Keys
     anthropic_api_key: Optional[str] = Field(None, validation_alias="ANTHROPIC_API_KEY")
 
     # Web
     webapp_url: AnyHttpUrl = Field(..., validation_alias="WEBAPP_URL")
-    redirect_uri: AnyHttpUrl = Field(..., validation_alias="REDIRECT_URI")
 
     # Security
     state_secret_key: Optional[str] = Field(None, validation_alias="STATE_SECRET_KEY")
@@ -97,11 +94,6 @@ class Settings(BaseSettings):
     # Credit Package Configuration
     credit_packages: Optional[Dict[str, Dict[str, Any]]] = Field(None, validation_alias="CREDIT_PACKAGES")
 
-    @field_validator("google_client_id")
-    def validate_google_client_id(cls, v: str) -> str:
-        if not v.endswith('.apps.googleusercontent.com'):
-            raise ValueError('Invalid Google Client ID format')
-        return v
 
     @field_validator("anthropic_api_key")
     def validate_anthropic_key(cls, v: Optional[str]) -> Optional[str]:
