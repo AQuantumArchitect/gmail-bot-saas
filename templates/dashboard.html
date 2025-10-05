@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Quantum Email Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .toggle-switch {
+      position: relative;
+      width: 60px;
+      height: 32px;
+    }
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #e5e7eb;
+      transition: .3s;
+      border-radius: 32px;
+    }
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 24px;
+      width: 24px;
+      left: 4px;
+      bottom: 4px;
+      background-color: white;
+      transition: .3s;
+      border-radius: 50%;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    input:checked + .slider {
+      background-color: #10b981;
+    }
+    input:checked + .slider:before {
+      transform: translateX(28px);
+    }
+    .quantum-glow {
+      animation: quantum-glow 2s ease-in-out infinite alternate;
+    }
+    @keyframes quantum-glow {
+      from { box-shadow: 0 0 20px rgba(59, 130, 246, 0.5); }
+      to { box-shadow: 0 0 30px rgba(147, 51, 234, 0.5); }
+    }
+    .processing-bar {
+      background: linear-gradient(90deg, #3b82f6, #8b5cf6, #3b82f6);
+      background-size: 200% 100%;
+      animation: processing-animation 2s linear infinite;
+    }
+    @keyframes processing-animation {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+  <!-- Header -->
+  <header class="bg-white border-b border-gray-200 sticky top-0 z-10">
+    <div class="max-w-7xl mx-auto px-4 py-4">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-3">
+          <div class="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center quantum-glow">
+            <span class="text-white text-sm font-bold">⚛️</span>
+          </div>
+          <h1 class="text-xl font-semibold text-gray-900">Quantum Email Dashboard</h1>
+          <span class="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">ACTIVE</span>
+        </div>
+        <div class="flex items-center space-x-4 text-sm">
+          <span class="text-gray-600" id="userEmail">luke.spooner@lotuscollective.ai</span>
+          <a href="/" class="text-gray-500 hover:text-gray-700">Home</a>
+          <a href="#" onclick="showHelp()" class="text-gray-500 hover:text-gray-700">Help</a>
+          <button onclick="signOut()" class="text-gray-500 hover:text-gray-700">Sign out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="max-w-7xl mx-auto px-4 py-8">
+
+    <!-- Authentication Success Banner -->
+    <div id="authSuccessBanner" class="mb-6 hidden">
+      <div class="bg-green-50 border border-green-200 rounded-lg p-4">
+        <div class="flex items-center">
+          <div class="flex-shrink-0">
+            <svg class="h-5 w-5 text-green-400" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+            </svg>
+          </div>
+          <div class="ml-3">
+            <p class="text-sm font-medium text-green-800">
+              🎉 Gmail authentication successful! You can now access your dashboard.
+            </p>
+          </div>
+          <div class="ml-auto pl-3">
+            <div class="-mx-1.5 -my-1.5">
+              <button onclick="hideAuthBanner()" class="inline-flex bg-green-50 rounded-md p-1.5 text-green-500 hover:bg-green-100">
+                <span class="sr-only">Dismiss</span>
+                <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- System Status Banner -->
+    <div class="mb-8">
+      <div class="bg-gradient-to-r from-blue-500 to-purple-600 rounded-xl text-white p-6 shadow-lg">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center space-x-4">
+            <div class="text-4xl">🚀</div>
+            <div>
+              <div class="flex items-center space-x-3">
+                <h2 class="text-lg font-medium">Quantum Email System</h2>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="systemToggle" checked onchange="toggleSystem()">
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <p class="text-blue-100 mt-1">Processing emails with quantum intelligence</p>
+            </div>
+          </div>
+          <div class="flex items-center space-x-3">
+            <button id="processNowBtn" onclick="processNow()"
+              class="px-4 py-2 bg-white/20 backdrop-blur-sm text-white rounded-lg hover:bg-white/30 transition-colors">
+              Process Now
+            </button>
+            <div class="text-right">
+              <div class="text-2xl font-bold" id="coherenceValue">84.7%</div>
+              <div class="text-xs text-blue-100">Quantum Coherence</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stats Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+      <div class="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm text-gray-600">Emails Today</p>
+            <p class="text-2xl font-bold text-gray-900" id="todayEmails">23</p>
+          </div>
+          <div class="text-blue-500 text-2xl">📧</div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm text-gray-600">Processed Total</p>
+            <p class="text-2xl font-bold text-gray-900" id="totalProcessed">1,247</p>
+          </div>
+          <div class="text-green-500 text-2xl">✅</div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm text-gray-600">Knowledge Nodes</p>
+            <p class="text-2xl font-bold text-gray-900" id="knowledgeNodes">5,847</p>
+          </div>
+          <div class="text-purple-500 text-2xl">🧠</div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm text-gray-600">Response Time</p>
+            <p class="text-2xl font-bold text-gray-900" id="responseTime">1.2s</p>
+          </div>
+          <div class="text-yellow-500 text-2xl">⚡</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Grid Layout -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+
+      <!-- Left Column - Main Controls -->
+      <div class="lg:col-span-2 space-y-6">
+
+        <!-- Quick Actions -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6">
+          <h3 class="text-lg font-medium text-gray-900 mb-4">🎯 Quick Actions</h3>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <button onclick="analyzeEmails()" class="p-3 bg-blue-50 rounded-lg text-center hover:bg-blue-100 transition-colors">
+              <div class="text-2xl mb-1">🔍</div>
+              <div class="text-xs font-medium">Analyze</div>
+            </button>
+            <button onclick="generateSummary()" class="p-3 bg-green-50 rounded-lg text-center hover:bg-green-100 transition-colors">
+              <div class="text-2xl mb-1">📊</div>
+              <div class="text-xs font-medium">Summarize</div>
+            </button>
+            <button onclick="draftResponses()" class="p-3 bg-purple-50 rounded-lg text-center hover:bg-purple-100 transition-colors">
+              <div class="text-2xl mb-1">✍️</div>
+              <div class="text-xs font-medium">Draft</div>
+            </button>
+            <button onclick="scheduleActions()" class="p-3 bg-yellow-50 rounded-lg text-center hover:bg-yellow-100 transition-colors">
+              <div class="text-2xl mb-1">📅</div>
+              <div class="text-xs font-medium">Schedule</div>
+            </button>
+          </div>
+        </div>
+
+        <!-- Processing Status -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6">
+          <h3 class="text-lg font-medium text-gray-900 mb-4">⚛️ Quantum Processing Status</h3>
+          <div class="space-y-4">
+            <div>
+              <div class="flex justify-between text-sm mb-1">
+                <span>Email Analysis</span>
+                <span id="analysisProgress">Idle</span>
+              </div>
+              <div class="w-full bg-gray-200 rounded-full h-2">
+                <div id="analysisBar" class="bg-blue-600 h-2 rounded-full" style="width: 0%"></div>
+              </div>
+            </div>
+
+            <div>
+              <div class="flex justify-between text-sm mb-1">
+                <span>Knowledge Graph Update</span>
+                <span id="graphProgress">Ready</span>
+              </div>
+              <div class="w-full bg-gray-200 rounded-full h-2">
+                <div id="graphBar" class="bg-purple-600 h-2 rounded-full" style="width: 100%"></div>
+              </div>
+            </div>
+
+            <div>
+              <div class="flex justify-between text-sm mb-1">
+                <span>Response Generation</span>
+                <span id="responseProgress">Standby</span>
+              </div>
+              <div class="w-full bg-gray-200 rounded-full h-2">
+                <div id="responseBar" class="bg-green-600 h-2 rounded-full" style="width: 0%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent Activity -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6">
+          <h3 class="text-lg font-medium text-gray-900 mb-4">📝 Recent Activity</h3>
+          <div id="activityFeed" class="space-y-3">
+            <div class="flex items-center justify-between py-2 text-sm">
+              <div class="flex items-center space-x-3">
+                <span class="text-green-600">✅</span>
+                <span>Processed partnership email from TechCorp</span>
+              </div>
+              <span class="text-gray-500">2 min ago</span>
+            </div>
+            <div class="flex items-center justify-between py-2 text-sm">
+              <div class="flex items-center space-x-3">
+                <span class="text-blue-600">🧠</span>
+                <span>Updated knowledge graph with 23 new entities</span>
+              </div>
+              <span class="text-gray-500">5 min ago</span>
+            </div>
+            <div class="flex items-center justify-between py-2 text-sm">
+              <div class="flex items-center space-x-3">
+                <span class="text-purple-600">✍️</span>
+                <span>Generated draft response for client inquiry</span>
+              </div>
+              <span class="text-gray-500">12 min ago</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column - Settings & Stats -->
+      <div class="space-y-6">
+
+        <!-- Quantum Settings -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6">
+          <h3 class="text-lg font-medium text-gray-900 mb-4">⚙️ Quantum Settings</h3>
+          <div class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                Processing Frequency
+              </label>
+              <select id="frequency" onchange="updateFrequency()"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="5">Every 5 minutes</option>
+                <option value="15" selected>Every 15 minutes</option>
+                <option value="30">Every 30 minutes</option>
+                <option value="60">Every hour</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                Quantum Coherence Level
+              </label>
+              <input type="range" id="coherenceSlider" min="0.1" max="1.0" step="0.1" value="0.8"
+                onchange="updateCoherence()"
+                class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+              <div class="flex justify-between text-xs text-gray-500 mt-1">
+                <span>Conservative</span>
+                <span>Optimal</span>
+                <span>Aggressive</span>
+              </div>
+            </div>
+
+            <div class="flex items-center justify-between">
+              <span class="text-sm font-medium text-gray-700">Auto-draft Responses</span>
+              <label class="toggle-switch">
+                <input type="checkbox" id="autoDraft" checked onchange="toggleAutoDraft()">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="flex items-center justify-between">
+              <span class="text-sm font-medium text-gray-700">Priority Alerts</span>
+              <label class="toggle-switch">
+                <input type="checkbox" id="priorityAlerts" checked onchange="toggleAlerts()">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- System Health -->
+        <div class="bg-gradient-to-br from-green-50 to-green-100 rounded-xl border border-green-200 p-6">
+          <h3 class="text-lg font-medium text-gray-900 mb-4">💚 System Health</h3>
+          <div class="space-y-3">
+            <div class="flex justify-between text-sm">
+              <span class="text-gray-600">API Status</span>
+              <span class="text-green-600 font-medium">✅ Online</span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-gray-600">Gmail Connection</span>
+              <span class="text-green-600 font-medium">✅ Active</span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-gray-600">Quantum Engine</span>
+              <span class="text-green-600 font-medium">✅ Optimal</span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-gray-600">Knowledge Graph</span>
+              <span class="text-green-600 font-medium">✅ Synced</span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-gray-600">Uptime</span>
+              <span class="text-green-600 font-medium">99.9%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Help & Support -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6">
+          <h3 class="text-lg font-medium text-gray-900 mb-4">🆘 Help & Support</h3>
+          <div class="space-y-3">
+            <button onclick="showHelp()" class="w-full text-left p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+              <div class="font-medium text-sm">📚 How it works</div>
+              <div class="text-xs text-gray-500 mt-1">Learn about quantum email processing</div>
+            </button>
+            <button onclick="showTroubleshooting()" class="w-full text-left p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+              <div class="font-medium text-sm">🔧 Troubleshooting</div>
+              <div class="text-xs text-gray-500 mt-1">Fix common issues</div>
+            </button>
+            <button onclick="contactSupport()" class="w-full text-left p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+              <div class="font-medium text-sm">💬 Contact Support</div>
+              <div class="text-xs text-gray-500 mt-1">Get help from our team</div>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    // Dashboard functionality
+    let systemActive = true;
+    let processing = false;
+
+    // Update stats periodically
+    async function updateStats() {
+      try {
+        const response = await fetch('/api/status');
+        const data = await response.json();
+
+        // Update stats if available
+        if (data.emails_processed) {
+          document.getElementById('totalProcessed').textContent = data.emails_processed.toLocaleString();
+        }
+
+        // Get quantum stats
+        const quantumResponse = await fetch('/quantum/stats');
+        const quantumData = await quantumResponse.json();
+
+        if (quantumData.quantum_coherence) {
+          const coherence = (quantumData.quantum_coherence * 100).toFixed(1) + '%';
+          document.getElementById('coherenceValue').textContent = coherence;
+        }
+
+        if (quantumData.knowledge_nodes) {
+          document.getElementById('knowledgeNodes').textContent = quantumData.knowledge_nodes.toLocaleString();
+        }
+
+      } catch (error) {
+        console.log('Stats update failed:', error);
+      }
+    }
+
+    function processNow() {
+      if (processing) return;
+
+      processing = true;
+      document.getElementById('processNowBtn').textContent = 'Processing...';
+
+      // Simulate processing
+      simulateProcessing();
+
+      setTimeout(() => {
+        processing = false;
+        document.getElementById('processNowBtn').textContent = 'Process Now';
+        addActivity('✅ Manual processing completed', 'just now');
+      }, 3000);
+    }
+
+    function simulateProcessing() {
+      const bars = ['analysisBar', 'responseBar'];
+      const progress = ['analysisProgress', 'responseProgress'];
+      const labels = ['Processing...', 'Generating...'];
+
+      bars.forEach((barId, index) => {
+        const bar = document.getElementById(barId);
+        const progressSpan = document.getElementById(progress[index]);
+
+        progressSpan.textContent = labels[index];
+        bar.classList.add('processing-bar');
+
+        let width = 0;
+        const interval = setInterval(() => {
+          width += 10;
+          bar.style.width = width + '%';
+
+          if (width >= 100) {
+            clearInterval(interval);
+            bar.classList.remove('processing-bar');
+            progressSpan.textContent = 'Complete';
+          }
+        }, 200);
+      });
+    }
+
+    function addActivity(message, time) {
+      const feed = document.getElementById('activityFeed');
+      const newActivity = document.createElement('div');
+      newActivity.className = 'flex items-center justify-between py-2 text-sm border-l-2 border-blue-500 pl-3 bg-blue-50 rounded-r';
+      newActivity.innerHTML = `
+        <div class="flex items-center space-x-3">
+          <span>${message}</span>
+        </div>
+        <span class="text-gray-500">${time}</span>
+      `;
+
+      feed.insertBefore(newActivity, feed.firstChild);
+
+      // Remove border and background after 3 seconds
+      setTimeout(() => {
+        newActivity.classList.remove('border-l-2', 'border-blue-500', 'pl-3', 'bg-blue-50');
+      }, 3000);
+    }
+
+    // Action functions
+    function analyzeEmails() {
+      addActivity('🔍 Started email analysis', 'just now');
+    }
+
+    function generateSummary() {
+      addActivity('📊 Generated email summaries', 'just now');
+    }
+
+    function draftResponses() {
+      addActivity('✍️ Created draft responses', 'just now');
+    }
+
+    function scheduleActions() {
+      addActivity('📅 Scheduled follow-up actions', 'just now');
+    }
+
+    function toggleSystem() {
+      systemActive = !systemActive;
+      const status = systemActive ? 'System activated' : 'System paused';
+      addActivity(systemActive ? '🚀 ' + status : '⏸️ ' + status, 'just now');
+    }
+
+    function updateFrequency() {
+      const freq = document.getElementById('frequency').value;
+      addActivity(`⏰ Processing frequency set to ${freq} minutes`, 'just now');
+    }
+
+    function updateCoherence() {
+      const coherence = document.getElementById('coherenceSlider').value;
+      const percentage = (coherence * 100).toFixed(0) + '%';
+      document.getElementById('coherenceValue').textContent = percentage;
+      addActivity(`⚛️ Quantum coherence adjusted to ${percentage}`, 'just now');
+    }
+
+    function toggleAutoDraft() {
+      const enabled = document.getElementById('autoDraft').checked;
+      addActivity(enabled ? '✍️ Auto-draft enabled' : '✍️ Auto-draft disabled', 'just now');
+    }
+
+    function toggleAlerts() {
+      const enabled = document.getElementById('priorityAlerts').checked;
+      addActivity(enabled ? '🔔 Priority alerts enabled' : '🔔 Priority alerts disabled', 'just now');
+    }
+
+    function showHelp() {
+      alert('📚 Quantum Email Intelligence Help\n\nThis system uses advanced AI to process your emails intelligently. The quantum coherence level controls how aggressively the AI interprets context and relationships.');
+    }
+
+    function showTroubleshooting() {
+      alert('🔧 Troubleshooting Guide\n\n1. Check Gmail connection in settings\n2. Verify quantum coherence is above 70%\n3. Ensure processing frequency is appropriate\n4. Contact support if issues persist');
+    }
+
+    function contactSupport() {
+      alert('💬 Contact Support\n\nEmail: support@quantum-email.ai\nResponse time: < 4 hours\nAvailable 24/7');
+    }
+
+    function signOut() {
+      if (confirm('Sign out of Quantum Email Dashboard?')) {
+        window.location.href = '/';
+      }
+    }
+
+    // Handle authentication success
+    function hideAuthBanner() {
+      document.getElementById('authSuccessBanner').classList.add('hidden');
+    }
+
+    function checkAuthSuccess() {
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.get('auth') === 'success') {
+        document.getElementById('authSuccessBanner').classList.remove('hidden');
+        // Clean up URL
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    }
+
+    // Initialize dashboard
+    document.addEventListener('DOMContentLoaded', () => {
+      checkAuthSuccess(); // Check for auth success first
+      updateStats();
+      setInterval(updateStats, 30000); // Update every 30 seconds
+
+      // Add initial activity
+      setTimeout(() => {
+        addActivity('🚀 Dashboard initialized', 'just now');
+      }, 1000);
+    });
+  </script>
+</body>
+</html>

@@ -28,6 +28,9 @@ from app.core.exceptions import (
 ROUTES_AVAILABLE = True
 ROUTE_IMPORT_ERRORS = {}
 
+# Initialize logger
+logger = logging.getLogger(__name__)
+
 # Import each route module individually to pinpoint failures
 route_modules = {}
 
@@ -52,27 +55,29 @@ def import_route_safely(module_name: str, import_path: str):
 logger.info("🔄 Starting route module imports...")
 
 health_ok = import_route_safely("health", "app.api.routes.health")
-auth_ok = import_route_safely("auth", "app.api.routes.auth") 
+auth_ok = import_route_safely("auth", "app.api.routes.auth")
 dashboard_ok = import_route_safely("dashboard", "app.api.routes.dashboard")
 gmail_ok = import_route_safely("gmail", "app.api.routes.gmail")
 billing_ok = import_route_safely("billing", "app.api.routes.billing")
+frontend_ok = import_route_safely("frontend", "app.api.routes.frontend")
 
 # Set availability flags
-ROUTES_AVAILABLE = all([health_ok, auth_ok, dashboard_ok, gmail_ok, billing_ok])
+ROUTES_AVAILABLE = all([health_ok, auth_ok, dashboard_ok, gmail_ok, billing_ok, frontend_ok])
 
 if ROUTES_AVAILABLE:
     logger.info("🎉 All route modules imported successfully!")
     # Assign to variables for backward compatibility
     health = route_modules.get("health")
     auth = route_modules.get("auth")
-    dashboard = route_modules.get("dashboard") 
+    dashboard = route_modules.get("dashboard")
     gmail = route_modules.get("gmail")
     billing = route_modules.get("billing")
+    frontend = route_modules.get("frontend")
 else:
     logger.error("💥 Some route modules failed to import:")
     failed_routes = [name for name, success in [
         ("health", health_ok), ("auth", auth_ok), ("dashboard", dashboard_ok),
-        ("gmail", gmail_ok), ("billing", billing_ok)
+        ("gmail", gmail_ok), ("billing", billing_ok), ("frontend", frontend_ok)
     ] if not success]
     logger.error(f"   Failed routes: {', '.join(failed_routes)}")
     
@@ -369,11 +374,20 @@ def create_app(app_settings: Optional[Settings] = None) -> FastAPI:
             # Try to include each router individually for better error isolation
             routers_to_include = [
                 ("health", health, "health"),
-                ("auth", auth, "auth"), 
+                ("auth", auth, "auth"),
                 ("dashboard", dashboard, "dashboard"),
                 ("gmail", gmail, "gmail"),
                 ("billing", billing, "billing")
             ]
+
+            # Include frontend router separately (no /api prefix)
+            if frontend and hasattr(frontend, 'router'):
+                app.include_router(frontend.router, tags=["frontend"])
+                logger.info("✅ Included frontend router (root routes)")
+                router_success["frontend"] = True
+            else:
+                logger.warning("⚠️  Frontend module has no router attribute")
+                router_success["frontend"] = False
             
             for router_name, module, tag in routers_to_include:
                 try:

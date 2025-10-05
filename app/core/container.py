@@ -14,7 +14,7 @@ Key SAAS Patterns:
 """
 import logging
 import asyncio
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, List, Union
 from threading import Lock, RLock
 
 # Core imports

@@ -135,3 +135,10 @@ private_keys/
 .vercel/
 .netlify/.railwayvariables
 .railwayvariables
+SECURE-DEPLOYMENT-VALUES.md
+railway-env-production.txt
+
+# ====================================================================
+# GIT CREDENTIALS
+# ====================================================================
+.git-credentials
